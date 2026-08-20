@@ -101,10 +101,13 @@ Setiap perubahan di UI memicu **engine render idempotent** (`dashboard/engine/`)
 | `render-dnsmasq.sh` | pool DHCP + static lease (`dhcp-host`) per pelanggan | dnsmasq (reload) |
 | `render-tc.sh` | Simple Queue per pelanggan (HTB + burst, DOWN di LAN + UP via ifb) | tc/br-lan |
 | `render-policy.sh` | `ip rule` fwmark → routing table + default route via/interface | ip rule/route |
+| `render-wireguard.sh` | kelola interface + peer WireGuard dari DB ke `/etc/wireguard/wg*.conf`; interface baru di `wg-quick up` + `systemctl enable`, update live via `wg syncconf` (tidak memutus handshake) | WireGuard |
 
 **Tag IP per pelanggan (RADAR):** setiap pelanggan aktif otomatis masuk address-list `customers` dan mendapat kelas queue sesuai profile — mirip Simple Queue + address-list MikroTik.
 
 **Firewall penuh:** rule filter (accept/drop/reject/log) per chain input/forward/output dengan matcher IP, port, proto, conn-state, ICMP, limit, dan address-list; mangle untuk mark packet/connection; Address List (IP/CIDR) dibuat via UI dan bisa dipakai sebagai matcher `src-list`/`dst-list`; policy routing memindahkan trafik ber-mark ke tabel routing terpisah.
+
+**VPN — WireGuard (GUI):** kelola interface (nama, ListenPort, Address, DNS, key) dan peer (PublicKey, AllowedIPs, Endpoint, PersistentKeepalive, PreSharedKey) dari halaman `IP · Tunnel → WireGuard`. Interface/peer yang sudah ada (mis. `/etc/wireguard/wg0.conf`) otomatis diimpor saat pertama kali dashboard berjalan (private key dipertahankan, tidak dipindah). Tombol *Regenerate Key* mengganti private key; perubahan diterapkan non-destruktif dengan `wg syncconf` sehingga handshake peer yang aktif tidak terputus. Status live (port, handshake, transfer Rx/Tx) ditampilkan dari `wg show all dump`.
 
 > Engine idempotent penuh: `render-nft.sh` memakai `nft delete table` lalu terapkan ulang (karena `nft -f` bersifat merge/add dan `flush table` tidak menghapus set/chains); `render-policy.sh` mencatat priority yang diterapkan di state file agar rule lama (yang priority-nya diubah/dihapus) ikut dibersihkan.
 
@@ -134,5 +137,5 @@ curl -s -X POST http://<IP>:8081/api/customers \
 - Untuk host yang menjalankan Docker, nftables memakai tabel terpisah (`inet router`) sehingga tidak mengganggu container.
 - `cockpit-networkmanager` terpasang; jika server memakai `systemd-networkd`, halaman Network di Cockpit hanya menampilkan status (disarankan tetap `networkd` agar tidak mengganggu layanan yang berjalan).
 - Dashboard memakai port `8081` (8080/8090 dipakai stack lain). Ubah di `dashboard/ubuntu-router-dashboard.service`.
-- Setelah reboot, `ubuntu-router-engine.service` (oneshot) memulihkan address-list, rule firewall/NAT/mangle, queue, policy routing, dan DHCP secara otomatis.
+- Setelah reboot, `ubuntu-router-engine.service` (oneshot) memulihkan address-list, rule firewall/NAT/mangle, queue, policy routing, interface/peer WireGuard, dan DHCP secara otomatis.
 - Nama pelanggan otomatis disanitasi untuk `dhcp-host` dnsmasq (hanya `[A-Za-z0-9-]`; spasi diubah/membuang), jadi nama seperti "Pak Budi" aman.

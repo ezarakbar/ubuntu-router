@@ -1,3 +1,4 @@
+import glob
 import hashlib
 import os
 import re
@@ -168,6 +169,30 @@ def init_db():
             active INTEGER DEFAULT 1,
             created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS wg_interfaces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            listen_port INTEGER DEFAULT 51820,
+            address TEXT,
+            dns TEXT,
+            private_key TEXT,
+            comment TEXT,
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS wg_peers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            iface_id INTEGER NOT NULL REFERENCES wg_interfaces(id) ON DELETE CASCADE,
+            name TEXT,
+            public_key TEXT NOT NULL,
+            preshared_key TEXT,
+            allowed_ips TEXT NOT NULL,
+            endpoint TEXT,
+            persistent_keepalive INTEGER DEFAULT 25,
+            comment TEXT,
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -194,6 +219,63 @@ def init_db():
         )
     conn.commit()
     conn.close()
+    seed_wg_from_files()
+
+
+def seed_wg_from_files():
+    """Import konfigurasi WireGuard yang sudah ada (/etc/wireguard/wg*.conf)
+    bila tabel wg_interfaces masih kosong — non-destruktif, key dipertahankan."""
+    try:
+        conn = db()
+        if conn.execute("SELECT COUNT(*) FROM wg_interfaces").fetchone()[0] > 0:
+            conn.close()
+            return
+        for conf in sorted(glob.glob("/etc/wireguard/wg*.conf")):
+            name = Path(conf).stem  # wg0, wg1, ...
+            iface = {}
+            peers = []
+            cur_peer = None
+            for raw in Path(conf).read_text().splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("["):
+                    if line == "[Interface]":
+                        cur_peer = None
+                    elif line == "[Peer]":
+                        cur_peer = {}
+                        peers.append(cur_peer)
+                    continue
+                k, _, v = line.partition("=")
+                k = k.strip()
+                v = v.strip()
+                if cur_peer is not None:
+                    cur_peer[k] = v
+                else:
+                    iface[k] = v
+            if not iface.get("PrivateKey"):
+                continue
+            cur = conn.execute(
+                "INSERT INTO wg_interfaces(name, listen_port, address, dns, private_key) "
+                "VALUES (?,?,?,?,?)",
+                (name, int(iface.get("ListenPort", 51820)),
+                 iface.get("Address"), iface.get("DNS"), iface["PrivateKey"]),
+            )
+            iface_id = cur.lastrowid
+            for p in peers:
+                if not p.get("PublicKey") or not p.get("AllowedIPs"):
+                    continue
+                conn.execute(
+                    "INSERT INTO wg_peers(iface_id, public_key, preshared_key, allowed_ips, "
+                    "endpoint, persistent_keepalive) VALUES (?,?,?,?,?,?)",
+                    (iface_id, p["PublicKey"], p.get("PresharedKey"),
+                     p["AllowedIPs"], p.get("Endpoint"),
+                     p.get("PersistentKeepalive", 25)),
+                )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -254,6 +336,7 @@ def apply_all():
     run_engine("render-dnsmasq.sh")
     run_engine("render-tc.sh")
     run_engine("render-policy.sh")
+    run_engine("render-wireguard.sh")
 
 
 # --------------------------------------------------------------------------
@@ -560,6 +643,46 @@ class PolicyUpdate(BaseModel):
     priority: Optional[int] = None
     via: Optional[str] = None
     dev: Optional[str] = None
+    comment: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class WgIfaceCreate(BaseModel):
+    name: str
+    listen_port: int = 51820
+    address: Optional[str] = None
+    dns: Optional[str] = None
+    private_key: Optional[str] = None
+    comment: Optional[str] = None
+
+
+class WgIfaceUpdate(BaseModel):
+    listen_port: Optional[int] = None
+    address: Optional[str] = None
+    dns: Optional[str] = None
+    private_key: Optional[str] = None
+    comment: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class WgPeerCreate(BaseModel):
+    iface_id: int
+    name: Optional[str] = None
+    public_key: str
+    preshared_key: Optional[str] = None
+    allowed_ips: str
+    endpoint: Optional[str] = None
+    persistent_keepalive: Optional[int] = 25
+    comment: Optional[str] = None
+
+
+class WgPeerUpdate(BaseModel):
+    name: Optional[str] = None
+    public_key: Optional[str] = None
+    preshared_key: Optional[str] = None
+    allowed_ips: Optional[str] = None
+    endpoint: Optional[str] = None
+    persistent_keepalive: Optional[int] = None
     comment: Optional[str] = None
     active: Optional[bool] = None
 
@@ -1394,6 +1517,238 @@ def delete_policy(rule_id: int):
     except HTTPException as e:
         raise HTTPException(500, e.detail)
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# WireGuard
+# --------------------------------------------------------------------------
+def wg_cmd(*args):
+    try:
+        p = subprocess.run(["wg", *args], capture_output=True, text=True, timeout=10)
+        return p.stdout.strip()
+    except Exception:
+        return ""
+
+
+def wg_gen_keypair():
+    priv = wg_cmd("genkey")
+    if not priv:
+        raise HTTPException(500, "wg genkey gagal (wireguard-tools?)")
+    pub = subprocess.run(
+        ["wg", "pubkey"], input=priv, capture_output=True, text=True, timeout=10
+    ).stdout.strip()
+    return priv, pub
+
+
+@app.get("/api/wg/interfaces", dependencies=[Depends(check_auth)])
+def list_wg():
+    conn = db()
+    ifaces = conn.execute("SELECT * FROM wg_interfaces ORDER BY id").fetchall()
+    out = []
+    for i in ifaces:
+        peers = conn.execute(
+            "SELECT * FROM wg_peers WHERE iface_id=? ORDER BY id", (i["id"],)
+        ).fetchall()
+        item = dict(i)
+        item["public_key"] = ""
+        if i["private_key"]:
+            item["public_key"] = subprocess.run(
+                ["wg", "pubkey"], input=i["private_key"], capture_output=True,
+                text=True, timeout=10,
+            ).stdout.strip()
+        item["peers"] = [dict(p) for p in peers]
+        out.append(item)
+    conn.close()
+    return out
+
+
+@app.post("/api/wg/interfaces", dependencies=[Depends(check_auth)])
+def create_wg(r: WgIfaceCreate):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", r.name):
+        raise HTTPException(400, "nama interface hanya huruf/angka/_/-")
+    priv = r.private_key
+    if not priv:
+        priv, _ = wg_gen_keypair()
+    conn = db()
+    try:
+        cur = conn.execute(
+            "INSERT INTO wg_interfaces(name, listen_port, address, dns, private_key, comment) "
+            "VALUES (?,?,?,?,?,?)",
+            (r.name, r.listen_port, r.address, r.dns, priv, r.comment),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        raise HTTPException(400, "nama interface sudah ada")
+    finally:
+        conn.close()
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"id": cur.lastrowid, "ok": True, "name": r.name}
+
+
+@app.put("/api/wg/interfaces/{iface_id}", dependencies=[Depends(check_auth)])
+def update_wg(iface_id: int, r: WgIfaceUpdate):
+    conn = db()
+    if not conn.execute("SELECT id FROM wg_interfaces WHERE id=?", (iface_id,)).fetchone():
+        conn.close()
+        raise HTTPException(404, "interface tidak ada")
+    fields, vals = [], []
+    for col, val in (
+        ("listen_port", r.listen_port), ("address", r.address), ("dns", r.dns),
+        ("private_key", r.private_key), ("comment", r.comment),
+    ):
+        if val is not None:
+            fields.append(f"{col}=?"); vals.append(val)
+    if r.active is not None:
+        fields.append("active=?"); vals.append(1 if r.active else 0)
+    if fields:
+        conn.execute(
+            f"UPDATE wg_interfaces SET {', '.join(fields)} WHERE id=?", (*vals, iface_id)
+        )
+        conn.commit()
+    conn.close()
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True}
+
+
+@app.delete("/api/wg/interfaces/{iface_id}", dependencies=[Depends(check_auth)])
+def delete_wg(iface_id: int):
+    conn = db()
+    row = conn.execute("SELECT name FROM wg_interfaces WHERE id=?", (iface_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "interface tidak ada")
+    conn.execute("DELETE FROM wg_peers WHERE iface_id=?", (iface_id,))
+    conn.execute("DELETE FROM wg_interfaces WHERE id=?", (iface_id,))
+    conn.commit()
+    conn.close()
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True}
+
+
+@app.post("/api/wg/interfaces/{iface_id}/keygen", dependencies=[Depends(check_auth)])
+def wg_keygen(iface_id: int):
+    priv, pub = wg_gen_keypair()
+    conn = db()
+    cur = conn.execute(
+        "UPDATE wg_interfaces SET private_key=? WHERE id=?", (priv, iface_id)
+    )
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(404, "interface tidak ada")
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True, "private_key": priv, "public_key": pub}
+
+
+@app.post("/api/wg/peers", dependencies=[Depends(check_auth)])
+def create_wg_peer(r: WgPeerCreate):
+    conn = db()
+    if not conn.execute("SELECT id FROM wg_interfaces WHERE id=?", (r.iface_id,)).fetchone():
+        conn.close()
+        raise HTTPException(404, "interface tidak ada")
+    cur = conn.execute(
+        "INSERT INTO wg_peers(iface_id, name, public_key, preshared_key, allowed_ips, "
+        "endpoint, persistent_keepalive, comment) VALUES (?,?,?,?,?,?,?,?)",
+        (r.iface_id, r.name, r.public_key, r.preshared_key, r.allowed_ips,
+         r.endpoint, r.persistent_keepalive, r.comment),
+    )
+    conn.commit()
+    conn.close()
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"id": cur.lastrowid, "ok": True}
+
+
+@app.put("/api/wg/peers/{peer_id}", dependencies=[Depends(check_auth)])
+def update_wg_peer(peer_id: int, r: WgPeerUpdate):
+    conn = db()
+    if not conn.execute("SELECT id FROM wg_peers WHERE id=?", (peer_id,)).fetchone():
+        conn.close()
+        raise HTTPException(404, "peer tidak ada")
+    fields, vals = [], []
+    for col, val in (
+        ("name", r.name), ("public_key", r.public_key), ("preshared_key", r.preshared_key),
+        ("allowed_ips", r.allowed_ips), ("endpoint", r.endpoint),
+        ("persistent_keepalive", r.persistent_keepalive), ("comment", r.comment),
+    ):
+        if val is not None:
+            fields.append(f"{col}=?"); vals.append(val)
+    if r.active is not None:
+        fields.append("active=?"); vals.append(1 if r.active else 0)
+    if fields:
+        conn.execute(
+            f"UPDATE wg_peers SET {', '.join(fields)} WHERE id=?", (*vals, peer_id)
+        )
+        conn.commit()
+    conn.close()
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True}
+
+
+@app.delete("/api/wg/peers/{peer_id}", dependencies=[Depends(check_auth)])
+def delete_wg_peer(peer_id: int):
+    conn = db()
+    cur = conn.execute("DELETE FROM wg_peers WHERE id=?", (peer_id,))
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(404, "peer tidak ada")
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True}
+
+
+@app.get("/api/wg/status", dependencies=[Depends(check_auth)])
+def wg_status():
+    out = wg_cmd("show", "all", "dump")
+    if not out:
+        return {"interfaces": []}
+    ifaces = {}
+    for line in out.splitlines():
+        f = line.split("\t")
+        if len(f) == 5 and f[0] and not f[0].startswith("interface"):
+            # baris interface: name, private_key, public_key, port, fwmark
+            ifaces[f[0]] = {"name": f[0], "public_key": f[2], "port": f[3], "peers": {}}
+        elif len(f) == 9:
+            # baris peer: iface, public_key, psk, endpoint, allowed_ips, hs, rx, tx, keepalive
+            iface = f[0]
+            if iface not in ifaces:
+                ifaces[iface] = {"name": iface, "public_key": "", "port": None, "peers": {}}
+            ifaces[iface]["peers"][f[1]] = {
+                "public_key": f[1],
+                "preshared_key": f[2],
+                "endpoint": f[3],
+                "allowed_ips": f[4],
+                "latest_handshake": f[5],
+                "rx": int(f[6]) if f[6].isdigit() else 0,
+                "tx": int(f[7]) if f[7].isdigit() else 0,
+                "persistent_keepalive": f[8],
+            }
+    conn = db()
+    for row in conn.execute("SELECT name FROM wg_interfaces").fetchall():
+        if row["name"] not in ifaces:
+            ifaces[row["name"]] = {"name": row["name"], "public_key": "", "port": None, "peers": {}}
+    conn.close()
+    return {"interfaces": list(ifaces.values())}
 
 
 # --------------------------------------------------------------------------

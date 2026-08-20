@@ -87,6 +87,8 @@ const MENU = [
   { key: "addrlists", label: "Firewall — Address List" },
   { grp: "IP · Routing" },
   { key: "policy", label: "Routing — Policy" },
+  { grp: "IP · Tunnel" },
+  { key: "wireguard", label: "Tunnel — WireGuard" },
   { key: "interfaces", label: "Interfaces" },
   { grp: "Sistem" },
   { key: "system", label: "System & Health" },
@@ -800,6 +802,154 @@ async function delPolicy(id) {
   } catch (e) { msg(e.message); }
 }
 
+/* ---------------- wireguard ---------------- */
+function hsAge(epoch) {
+  const e = parseInt(epoch) || 0;
+  if (!e) return "–";
+  const s = Math.floor(Date.now() / 1000) - e;
+  if (s < 0) return "baru";
+  if (s < 60) return s + " s";
+  if (s < 3600) return Math.floor(s / 60) + " m";
+  return Math.floor(s / 3600) + " j";
+}
+const fmtBytes = b => {
+  const n = Number(b) || 0;
+  if (n < 1024) return n + " B";
+  const u = ["KB", "MB", "GB"];
+  let i = -1;
+  let v = n;
+  do { v /= 1024; i++; } while (v >= 1024 && i < u.length - 1);
+  return v.toFixed(1) + " " + u[i];
+};
+
+async function renderWireguard() {
+  const [ifaces, status] = await Promise.all([api("/wg/interfaces"), api("/wg/status")]);
+  const live = {};
+  status.interfaces.forEach(i => live[i.name] = i);
+  content(`
+    <section class="view"><h2>Tambah Interface WireGuard</h2>
+      <form class="f" onsubmit="return false;">
+        <label>Nama<input id="wgName" placeholder="wg1" required></label>
+        <label>Listen Port<input id="wgPort" type="number" value="51821"></label>
+        <label>Address (CIDR)<input id="wgAddr" placeholder="10.10.4.1/24" required></label>
+        <label>DNS (ops.)<input id="wgDns" placeholder="10.10.0.1"></label>
+        <label>Komentar<input id="wgComment" placeholder="cth: klien kantor"></label>
+        <button onclick="addWgIface()">Tambah (auto-gen key)</button>
+      </form>
+    </section>
+    ${ifaces.map(i => {
+      const st = live[i.name] || {};
+      const peers = st.peers || {};
+      return `
+      <section class="view">
+        <h2><b>${esc(i.name)}</b>
+          <span>
+            ${badge(i.active, "aktif", "nonaktif")}
+            <button class="ghost mini" onclick="toggleWgIface(${i.id}, ${i.active ? 0 : 1})">${i.active ? "Nonaktif" : "Aktif"}</button>
+            <button class="ghost mini" onclick="keygenWg(${i.id})">Regenerate Key</button>
+            <button class="danger mini" onclick="delWgIface(${i.id})">Hapus</button>
+          </span>
+        </h2>
+        <table><tbody>
+          <tr><td class="muted">Public Key</td><td><code>${esc(i.public_key || "–")}</code></td></tr>
+          <tr><td class="muted">Listen Port</td><td>${esc(String(st.port ?? i.listen_port))}</td></tr>
+          <tr><td class="muted">Address</td><td>${esc(i.address || "–")}</td></tr>
+          <tr><td class="muted">DNS</td><td>${esc(i.dns || "–")}</td></tr>
+        </tbody></table>
+        <h3 style="margin:14px 0 8px;font-size:12px;color:var(--mut)">Tambahkan Peer</h3>
+        <form class="f" onsubmit="return false;">
+          <label>Nama<input id="wgpName_${i.id}" placeholder="client-01"></label>
+          <label>Public Key<input id="wgpPub_${i.id}" placeholder="base64" required></label>
+          <label>AllowedIPs<input id="wgpAllow_${i.id}" placeholder="10.10.1.2/32" required></label>
+          <label>Endpoint<input id="wgpEp_${i.id}" placeholder="1.2.3.4:51820"></label>
+          <label>Keepalive<input id="wgpKa_${i.id}" type="number" value="25"></label>
+          <button class="ghost" onclick="addWgPeer(${i.id})">+ Peer</button>
+        </form>
+        <table><thead><tr><th>Nama</th><th>Public Key</th><th>AllowedIPs</th><th>Endpoint</th><th>Handshake</th><th>Rx/Tx</th><th>Status</th><th>Aksi</th></tr></thead>
+        <tbody>${(i.peers || []).map(p => {
+          const lp = peers[p.public_key] || {};
+          return `<tr><td>${esc(p.name) || "–"}</td>
+            <td><code style="font-size:10.5px">${esc(p.public_key.slice(0, 18))}…</code></td>
+            <td>${esc(p.allowed_ips)}</td>
+            <td>${esc(p.endpoint) || "–"}</td>
+            <td>${hsAge(lp.latest_handshake)}</td>
+            <td class="muted">${fmtBytes(lp.rx)} / ${fmtBytes(lp.tx)}</td>
+            <td>${badge(p.active, "aktif", "mati")}</td>
+            <td><button class="ghost mini" onclick="toggleWgPeer(${p.id}, ${p.active ? 0 : 1})">${p.active ? "Nonaktif" : "Aktif"}</button>
+                <button class="danger mini" onclick="delWgPeer(${p.id})">Hapus</button></td></tr>`;
+        }).join("") || '<tr><td colspan="8" class="muted">Belum ada peer</td></tr>'}
+        </tbody></table>
+      </section>`;
+    }).join("") || '<section class="view"><h2>WireGuard</h2><p class="muted">Belum ada interface. Tambah di atas.</p></section>'}
+  `);
+}
+async function addWgIface() {
+  const body = {
+    name: document.getElementById("wgName").value.trim(),
+    listen_port: +document.getElementById("wgPort").value || 51820,
+    address: document.getElementById("wgAddr").value.trim() || null,
+    dns: document.getElementById("wgDns").value.trim() || null,
+    comment: document.getElementById("wgComment").value.trim() || null,
+  };
+  if (!body.name || !body.address) return msg("Nama & Address wajib");
+  try {
+    await api("/wg/interfaces", { method: "POST", body });
+    msg("Interface WireGuard dibuat & aktif", "okmsg"); renderWireguard().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function addWgPeer(ifaceId) {
+  const g = id => document.getElementById(id).value;
+  const body = {
+    iface_id: ifaceId,
+    name: g("wgpName_" + ifaceId).trim() || null,
+    public_key: g("wgpPub_" + ifaceId).trim(),
+    allowed_ips: g("wgpAllow_" + ifaceId).trim(),
+    endpoint: g("wgpEp_" + ifaceId).trim() || null,
+    persistent_keepalive: +g("wgpKa_" + ifaceId) || 25,
+  };
+  if (!body.public_key || !body.allowed_ips) return msg("Public Key & AllowedIPs wajib");
+  try {
+    await api("/wg/peers", { method: "POST", body });
+    msg("Peer ditambahkan & diterapkan", "okmsg"); renderWireguard().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function toggleWgIface(id, active) {
+  try {
+    await api("/wg/interfaces/" + id, { method: "PUT", body: { active } });
+    msg("Interface " + (active ? "diaktifkan" : "dinonaktifkan"), "okmsg");
+    renderWireguard().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function keygenWg(id) {
+  if (!confirm("Generate ulang private key? PEER DI CLIENT HARUS DIPERBARUI.")) return;
+  try {
+    const r = await api(`/wg/interfaces/${id}/keygen`, { method: "POST" });
+    msg("Key baru digenerate. Public key: " + r.public_key.slice(0, 20) + "… (salin ke peer)", "okmsg");
+    renderWireguard().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function delWgIface(id) {
+  if (!confirm("Hapus interface WireGuard #" + id + " (beserta semua peer)?")) return;
+  try {
+    await api("/wg/interfaces/" + id, { method: "DELETE" });
+    msg("Interface dihapus", "okmsg"); renderWireguard().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function toggleWgPeer(id, active) {
+  try {
+    await api("/wg/peers/" + id, { method: "PUT", body: { active } });
+    msg("Peer " + (active ? "diaktifkan" : "dinonaktifkan"), "okmsg");
+    renderWireguard().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function delWgPeer(id) {
+  if (!confirm("Hapus peer #" + id + "?")) return;
+  try {
+    await api("/wg/peers/" + id, { method: "DELETE" });
+    msg("Peer dihapus", "okmsg"); renderWireguard().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+
 /* ---------------- router ---------------- */
 const RENDER = {
   dashboard: renderDashboard,
@@ -812,6 +962,7 @@ const RENDER = {
   mangle: renderMangle,
   addrlists: renderAddrLists,
   policy: renderPolicy,
+  wireguard: renderWireguard,
   interfaces: renderInterfaces,
   system: renderSystem,
   logs: renderLogs,
