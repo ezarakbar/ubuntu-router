@@ -109,6 +109,8 @@ Setiap perubahan di UI memicu **engine render idempotent** (`dashboard/engine/`)
 
 **VPN — WireGuard (GUI):** kelola interface (nama, ListenPort, Address, DNS, key) dan peer (PublicKey, AllowedIPs, Endpoint, PersistentKeepalive, PreSharedKey) dari halaman `IP · Tunnel → WireGuard`. Interface/peer yang sudah ada (mis. `/etc/wireguard/wg0.conf`) otomatis diimpor saat pertama kali dashboard berjalan (private key dipertahankan, tidak dipindah). Tombol *Regenerate Key* mengganti private key; perubahan diterapkan non-destruktif dengan `wg syncconf` sehingga handshake peer yang aktif tidak terputus. Status live (port, handshake, transfer Rx/Tx) ditampilkan dari `wg show all dump`.
 
+**VPN — OpenVPN (GUI):** halaman `IP · Tunnel → OpenVPN` menampilkan status service (aktif/boot, traffic TUN, IP peer) dan form edit konfigurasi `router.conf` (port, proto, dev, IP server/client, cipher, auth, keepalive, verb). Perubahan ditulis lalu service `openvpn-server@router` direstart. Tombol nyala/mati mengontrol service + enable boot. Tersedia unduhan `client.ovpn` (mode static-key) yang sudah berisi key inline + `remote <public-ip> <port>` (IP publik dideteksi otomatis dari default route).
+
 > Engine idempotent penuh: `render-nft.sh` memakai `nft delete table` lalu terapkan ulang (karena `nft -f` bersifat merge/add dan `flush table` tidak menghapus set/chains); `render-policy.sh` mencatat priority yang diterapkan di state file agar rule lama (yang priority-nya diubah/dihapus) ikut dibersihkan.
 
 ## Menambah pelanggan (contoh)

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -1749,6 +1750,212 @@ def wg_status():
             ifaces[row["name"]] = {"name": row["name"], "public_key": "", "port": None, "peers": {}}
     conn.close()
     return {"interfaces": list(ifaces.values())}
+
+
+# --------------------------------------------------------------------------
+# OpenVPN (static-key mode, manage existing server/router.conf)
+# --------------------------------------------------------------------------
+OVPN_CONF = "/etc/openvpn/server/router.conf"
+OVPN_KEY = "/etc/openvpn/server/router.key"
+OVPN_STATUS = "/var/log/openvpn-router-status.log"
+OVPN_SERVICE = "openvpn-server@router.service"
+
+
+class OvpnConfigUpdate(BaseModel):
+    port: Optional[int] = None
+    proto: Optional[str] = None
+    dev: Optional[str] = None
+    server_ip: Optional[str] = None
+    client_ip: Optional[str] = None
+    cipher: Optional[str] = None
+    auth: Optional[str] = None
+    keepalive: Optional[str] = None
+    verb: Optional[int] = None
+
+
+def ovpn_read_config():
+    cfg = {
+        "port": "1194", "proto": "udp", "dev": "tun",
+        "server_ip": "10.10.2.1", "client_ip": "10.10.2.2",
+        "cipher": "AES-256-CBC", "auth": "SHA256",
+        "keepalive": "10 120", "verb": "3",
+        "raw": "",
+    }
+    try:
+        with open(OVPN_CONF) as f:
+            cfg["raw"] = f.read()
+        for line in cfg["raw"].splitlines():
+            line = line.split("#", 1)[0].strip()
+            p = line.split()
+            if not p:
+                continue
+            k = p[0]
+            if k == "port" and len(p) > 1:
+                cfg["port"] = p[1]
+            elif k == "proto" and len(p) > 1:
+                cfg["proto"] = p[1]
+            elif k == "dev" and len(p) > 1:
+                cfg["dev"] = p[1]
+            elif k == "ifconfig" and len(p) > 2:
+                cfg["server_ip"], cfg["client_ip"] = p[1], p[2]
+            elif k == "cipher" and len(p) > 1:
+                cfg["cipher"] = p[1]
+            elif k == "auth" and len(p) > 1:
+                cfg["auth"] = p[1]
+            elif k == "keepalive" and len(p) > 2:
+                cfg["keepalive"] = p[1] + " " + p[2]
+            elif k == "verb" and len(p) > 1:
+                cfg["verb"] = p[1]
+    except FileNotFoundError:
+        pass
+    return cfg
+
+
+def ovpn_status():
+    st = {"active": False, "enabled": False, "updated": None, "tun_read": 0, "tun_write": 0}
+    try:
+        st["active"] = subprocess.run(
+            ["systemctl", "is-active", OVPN_SERVICE], capture_output=True, text=True, timeout=5
+        ).stdout.strip() == "active"
+        st["enabled"] = subprocess.run(
+            ["systemctl", "is-enabled", OVPN_SERVICE], capture_output=True, text=True, timeout=5
+        ).stdout.strip() == "enabled"
+    except Exception:
+        pass
+    try:
+        with open(OVPN_STATUS) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("Updated,"):
+                    st["updated"] = line.split(",", 1)[1]
+                elif line.startswith("TUN/TAP read bytes,"):
+                    st["tun_read"] = int(line.split(",", 1)[1])
+                elif line.startswith("TUN/TAP write bytes,"):
+                    st["tun_write"] = int(line.split(",", 1)[1])
+    except FileNotFoundError:
+        pass
+    return st
+
+
+def ovpn_public_ip():
+    try:
+        out = subprocess.run(
+            ["ip", "-4", "route", "get", "1.1.1.1"], capture_output=True, text=True, timeout=5
+        ).stdout
+        for tok in out.split():
+            if tok.startswith("src"):
+                continue
+        parts = out.split()
+        if "src" in parts:
+            return parts[parts.index("src") + 1]
+    except Exception:
+        pass
+    return ""
+
+
+def ovpn_write_config(c: OvpnConfigUpdate):
+    cur = ovpn_read_config()
+    port = c.port if c.port is not None else cur["port"]
+    proto = (c.proto or cur["proto"]).strip()
+    dev = (c.dev or cur["dev"]).strip()
+    srv = (c.server_ip or cur["server_ip"]).strip()
+    cli = (c.client_ip or cur["client_ip"]).strip()
+    cipher = (c.cipher or cur["cipher"]).strip()
+    auth = (c.auth or cur["auth"]).strip()
+    keep = (c.keepalive or cur["keepalive"]).strip()
+    verb = c.verb if c.verb is not None else int(cur["verb"])
+    body = (
+        "# OpenVPN Server - static key mode (dikelola dashboard)\n"
+        f"dev {dev}\n"
+        f"proto {proto}\n"
+        f"port {port}\n"
+        f"ifconfig {srv} {cli}\n"
+        "secret /etc/openvpn/server/router.key\n"
+        f"cipher {cipher}\n"
+        f"auth {auth}\n"
+        f"keepalive {keep}\n"
+        "user nobody\n"
+        "group nogroup\n"
+        "persist-key\n"
+        "persist-tun\n"
+        f"status {OVPN_STATUS}\n"
+        f"verb {verb}\n"
+    )
+    return body
+
+
+@app.get("/api/openvpn", dependencies=[Depends(check_auth)])
+def get_openvpn():
+    cfg = ovpn_read_config()
+    st = ovpn_status()
+    cfg["service"] = st
+    cfg["public_ip"] = ovpn_public_ip()
+    cfg["key_exists"] = os.path.exists(OVPN_KEY)
+    return cfg
+
+
+@app.put("/api/openvpn", dependencies=[Depends(check_auth)])
+def update_openvpn(r: OvpnConfigUpdate):
+    if not os.path.exists(OVPN_CONF):
+        raise HTTPException(404, "konfigurasi OpenVPN tidak ditemukan")
+    body = ovpn_write_config(r)
+    try:
+        with open(OVPN_CONF, "w") as f:
+            f.write(body)
+    except PermissionError:
+        raise HTTPException(500, "dashboard tidak bisa menulis konfigurasi (izin?)")
+    p = subprocess.run(["systemctl", "restart", OVPN_SERVICE], capture_output=True, text=True, timeout=30)
+    if p.returncode != 0:
+        raise HTTPException(500, "gagal restart OpenVPN: " + p.stderr.strip()[-300:])
+    return {"ok": True, "config": body}
+
+
+@app.post("/api/openvpn/toggle", dependencies=[Depends(check_auth)])
+def toggle_openvpn(r: dict):
+    active = bool(r.get("active"))
+    if not os.path.exists(OVPN_CONF):
+        raise HTTPException(404, "konfigurasi OpenVPN tidak ditemukan")
+    action = "start" if active else "stop"
+    p = subprocess.run(["systemctl", action, OVPN_SERVICE], capture_output=True, text=True, timeout=30)
+    if p.returncode != 0:
+        raise HTTPException(500, f"gagal {action}: " + p.stderr.strip()[-300:])
+    en = subprocess.run(["systemctl", "enable" if active else "disable", OVPN_SERVICE],
+                        capture_output=True, text=True, timeout=10)
+    return {"ok": True, "active": active}
+
+
+@app.get("/api/openvpn/client.ovpn", dependencies=[Depends(check_auth)])
+def openvpn_client():
+    if not os.path.exists(OVPN_KEY):
+        raise HTTPException(404, "static key tidak ditemukan")
+    cfg = ovpn_read_config()
+    pub = ovpn_public_ip() or "PUBLIC_IP"
+    with open(OVPN_KEY) as f:
+        key = f.read().strip()
+    body = (
+        "# OpenVPN client - static key mode (unduh dari dashboard)\n"
+        "client\n"
+        f"dev {cfg['dev']}\n"
+        f"proto {cfg['proto']}\n"
+        f"remote {pub} {cfg['port']}\n"
+        "resolv-retry infinite\n"
+        "nobind\n"
+        "persist-key\n"
+        "persist-tun\n"
+        f"ifconfig {cfg['client_ip']} {cfg['server_ip']}\n"
+        "<secret>\n"
+        f"{key}\n"
+        "</secret>\n"
+        f"cipher {cfg['cipher']}\n"
+        f"auth {cfg['auth']}\n"
+        f"keepalive {cfg['keepalive']}\n"
+        f"verb {cfg['verb']}\n"
+    )
+    return Response(
+        content=body,
+        media_type="application/x-openvpn-profile",
+        headers={"Content-Disposition": "attachment; filename=client.ovpn"},
+    )
 
 
 # --------------------------------------------------------------------------

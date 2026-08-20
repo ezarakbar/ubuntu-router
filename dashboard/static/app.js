@@ -89,6 +89,7 @@ const MENU = [
   { key: "policy", label: "Routing — Policy" },
   { grp: "IP · Tunnel" },
   { key: "wireguard", label: "Tunnel — WireGuard" },
+  { key: "openvpn", label: "Tunnel — OpenVPN" },
   { key: "interfaces", label: "Interfaces" },
   { grp: "Sistem" },
   { key: "system", label: "System & Health" },
@@ -950,6 +951,72 @@ async function delWgPeer(id) {
   } catch (e) { msg(e.message); }
 }
 
+/* ---------------- openvpn ---------------- */
+async function renderOpenvpn() {
+  let cfg = {};
+  try { cfg = await api("/openvpn"); } catch (e) { msg(e.message); }
+  const s = cfg.service || {};
+  content(`
+    <section class="view"><h2>OpenVPN Server
+      <span>${badge(s.active, "aktif", "mati")}
+        <button class="ghost mini" onclick="toggleOpenvpn(${s.active ? 0 : 1})">${s.active ? "Matikan" : "Nyalakan"}</button>
+        <a class="btn mini" href="/api/openvpn/client.ovpn" target="_blank">Unduh client.ovpn</a>
+      </span>
+    </h2>
+    <table><tbody>
+      <tr><td class="muted">Aktif saat boot</td><td>${s.enabled ? "ya" : "tidak"}</td></tr>
+      <tr><td class="muted">Status terakhir</td><td>${esc(s.updated || "–")}</td></tr>
+      <tr><td class="muted">Traffic TUN</td><td>${fmtBytes(s.tun_read)} baca / ${fmtBytes(s.tun_write)} tulis</td></tr>
+      <tr><td class="muted">Peer (static key)</td><td>${esc(cfg.client_ip || "–")}</td></tr>
+      <tr><td class="muted">Public IP untuk client</td><td>${esc(cfg.public_ip || "deteksi gagal — isi manual")}</td></tr>
+    </tbody></table>
+    <p class="muted">Mode static-key (1 peer). File <code>client.ovpn</code> berisi key inline, siap diimpor ke aplikasi OpenVPN client.</p>
+    </section>
+
+    <section class="view"><h2>Konfigurasi Server</h2>
+      <form class="f" onsubmit="return false;">
+        <label>Port<input id="ovPort" value="${esc(cfg.port || "1194")}"></label>
+        <label>Proto<input id="ovProto" value="${esc(cfg.proto || "udp")}"></label>
+        <label>Dev<input id="ovDev" value="${esc(cfg.dev || "tun")}"></label>
+        <label>IP Server<input id="ovSrv" value="${esc(cfg.server_ip || "")}"></label>
+        <label>IP Client<input id="ovCli" value="${esc(cfg.client_ip || "")}"></label>
+        <label>Cipher<input id="ovCipher" value="${esc(cfg.cipher || "")}"></label>
+        <label>Auth<input id="ovAuth" value="${esc(cfg.auth || "")}"></label>
+        <label>Keepalive (s s)<input id="ovKeep" value="${esc(cfg.keepalive || "")}"></label>
+        <label>Verb<input id="ovVerb" value="${esc(String(cfg.verb || ""))}"></label>
+        <button onclick="saveOpenvpn()">Simpan & restart OpenVPN</button>
+      </form>
+    </section>
+  `);
+}
+async function saveOpenvpn() {
+  const g = id => document.getElementById(id).value;
+  const body = {
+    port: +g("ovPort") || 1194,
+    proto: g("ovProto") || "udp",
+    dev: g("ovDev") || "tun",
+    server_ip: g("ovSrv") || null,
+    client_ip: g("ovCli") || null,
+    cipher: g("ovCipher") || null,
+    auth: g("ovAuth") || null,
+    keepalive: g("ovKeep") || null,
+    verb: +g("ovVerb") || 3,
+  };
+  try {
+    const r = await api("/openvpn", { method: "PUT", body });
+    msg("Konfigurasi disimpan & OpenVPN direstart", "okmsg");
+    if (r.config) console.log(r.config);
+    renderOpenvpn().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function toggleOpenvpn(active) {
+  try {
+    await api("/openvpn/toggle", { method: "POST", body: { active } });
+    msg("OpenVPN " + (active ? "dinyalakan" : "dimatikan"), "okmsg");
+    renderOpenvpn().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+
 /* ---------------- router ---------------- */
 const RENDER = {
   dashboard: renderDashboard,
@@ -963,6 +1030,7 @@ const RENDER = {
   addrlists: renderAddrLists,
   policy: renderPolicy,
   wireguard: renderWireguard,
+  openvpn: renderOpenvpn,
   interfaces: renderInterfaces,
   system: renderSystem,
   logs: renderLogs,
