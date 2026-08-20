@@ -1,0 +1,18 @@
+[Unit]
+Description=Ubuntu Router Dashboard (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=APP_DIR=/opt/ubuntu-router
+Environment=ADMIN_PASSWORD=${ADMIN_PASSWORD}
+ExecStart=/opt/ubuntu-router/.venv/bin/uvicorn dashboard.main:app --host 0.0.0.0 --port 8081 --app-dir /opt/ubuntu-router
+WorkingDirectory=/opt/ubuntu-router
+Restart=always
+RestartSec=3
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

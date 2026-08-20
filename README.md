@@ -71,9 +71,58 @@ VLAN_ID=200 LAN_SUBNET=192.168.200.0/24 EXTRA_OPEN_PORTS=8080,8090 \
 - **SSH**: port `22`
 - **Web GUI (Cockpit)**: `https://<IP-server>:9090` (login user sistem)
 - **WireGuard client template**: `/root/wg-client.conf.example` (dibuat saat instalasi)
+- **Dashboard Ubuntu Router**: `http://<IP-server>:8081` (login `admin` / password default `admin123` — wajib diganti)
+
+## Dashboard manajemen (pengganti Webfig/Winbox)
+
+Dashboard FastAPI + SQLite di `dashboard/` — menu meniru struktur RouterOS:
+
+```
+Dashboard          ringkasan trafik, pelanggan, lease, CPU/RAM/disk
+Pelanggan         tambah/atur pelanggan (MAC, IP statis/dinamis, profile, aktif/nonaktif)
+Profile           definisi bandwidth (rate down/up kbit, priority) — setara Simple Queue
+IP ▸ DHCP Pool    range DHCP per interface (gateway, DNS, leasetime)
+IP ▸ DHCP Lease   daftar lease aktif dari dnsmasq
+IP ▸ Firewall NAT dstnat (port-forward) & srcnat (masquerade)
+Interfaces        daftar NIC + alamat + statistik trafik
+System            identity, health, ganti password admin
+Logs              journald viewer
+```
+
+Setiap perubahan di UI memicu **engine render idempotent** (`dashboard/engine/`):
+
+| Script | Fungsi | Diterapkan ke |
+|---|---|---|
+| `render-nft.sh` | address-list pelanggan + rule NAT (tabel `ip ur_dyn`) | nftables |
+| `render-dnsmasq.sh` | pool DHCP + static lease (`dhcp-host`) per pelanggan | dnsmasq (reload) |
+| `render-tc.sh` | Simple Queue per pelanggan (HTB, DOWN di LAN + UP via ifb) | tc/br-lan |
+
+**Tag IP per pelanggan (RADAR):** setiap pelanggan aktif otomatis masuk address-list `customers` dan mendapat kelas queue sesuai profile — mirip Simple Queue + address-list MikroTik.
+
+## Menambah pelanggan (contoh)
+
+```bash
+# via API
+TOKEN=$(curl -s -X POST http://<IP>:8081/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin123"}' | jq -r .token)
+
+# buat profile 7M
+curl -s -X POST http://<IP>:8081/api/profiles \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"7M","rate_down_kbit":7000,"rate_up_kbit":3000}'
+
+# daftarkan pelanggan (static IP dari pool + MAC)
+curl -s -X POST http://<IP>:8081/api/customers \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"budiman","mac":"aa:bb:cc:00:11:22","static_ip":"10.10.0.150","profile":"7M"}'
+# => dhcp-host + address-list + queue 7M langsung aktif
+```
 
 ## Catatan
 
-- Script diuji tuntas (EXIT 0, reboot test, uji DHCP/DNS/NAT) pada Ubuntu Server 22.04.
+- Script diuji tuntas (EXIT 0, reboot test, uji DHCP/DNS/NAT, uji queue/address-list) pada Ubuntu Server 22.04.
 - Untuk host yang menjalankan Docker, nftables memakai tabel terpisah (`inet router`) sehingga tidak mengganggu container.
 - `cockpit-networkmanager` terpasang; jika server memakai `systemd-networkd`, halaman Network di Cockpit hanya menampilkan status (disarankan tetap `networkd` agar tidak mengganggu layanan yang berjalan).
+- Dashboard memakai port `8081` (8080/8090 dipakai stack lain). Ubah di `dashboard/ubuntu-router-dashboard.service`.
+- Setelah reboot, `ubuntu-router-engine.service` (oneshot) memulihkan address-list, rule NAT, dan queue secara otomatis.

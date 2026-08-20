@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ubuntu Router — Dashboard</title>
+<style>
+  :root {
+    --bg:#0d1117; --panel:#161b27; --line:#2a3245; --fg:#dbe3f5; --mut:#8b97b5;
+    --acc:#4f8cff; --ok:#2ecc71; --warn:#f1c40f; --bad:#e74c3c; --side:#11161f;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--fg); font:14px/1.5 ui-monospace,Consolas,monospace; }
+  a { color:var(--acc); text-decoration:none; }
+  input,select,textarea { background:#0d1220; color:var(--fg); border:1px solid var(--line);
+    border-radius:6px; padding:7px 9px; font:inherit; width:100%; }
+  button { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:8px 14px;
+    cursor:pointer; font:inherit; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--mut); }
+  button.danger { background:var(--bad); }
+  button.mini { padding:4px 9px; font-size:12px; }
+  .hidden { display:none !important; }
+  .muted { color:var(--mut); font-size:12px; }
+  .err { color:var(--bad); } .okmsg { color:var(--ok); }
+
+  /* login */
+  #login { position:fixed; inset:0; background:var(--bg); display:flex; align-items:center;
+    justify-content:center; z-index:50; }
+  .login-box { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:32px; width:340px; }
+  .login-box h1 { font-size:16px; margin-bottom:4px; color:#fff; }
+  .login-box p { color:var(--mut); font-size:12px; margin-bottom:20px; }
+  .login-box label { font-size:11px; color:var(--mut); display:flex; flex-direction:column;
+    gap:4px; margin-bottom:12px; }
+  #msgLogin { min-height:18px; margin-top:10px; font-size:12px; }
+
+  /* layout */
+  #app { display:none; height:100vh; }
+  #app.on { display:flex; }
+  aside { width:220px; background:var(--side); border-right:1px solid var(--line);
+    display:flex; flex-direction:column; overflow-y:auto; }
+  .brand { padding:16px 14px; border-bottom:1px solid var(--line); }
+  .brand b { color:#fff; font-size:14px; } .brand span { color:var(--acc); }
+  nav { flex:1; padding:8px 0; }
+  nav .grp { padding:10px 14px 4px; font-size:10.5px; color:var(--mut); text-transform:uppercase;
+    letter-spacing:.08em; }
+  nav a.menu { display:block; padding:8px 14px; color:var(--fg); font-size:13px; cursor:pointer; }
+  nav a.menu:hover { background:rgba(79,140,255,.08); color:#fff; }
+  nav a.menu.active { background:rgba(79,140,255,.14); color:#fff; border-left:3px solid var(--acc); }
+  .side-foot { padding:10px 14px; border-top:1px solid var(--line); font-size:11px; color:var(--mut); }
+
+  main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  header.topbar { display:flex; justify-content:space-between; align-items:center;
+    padding:12px 20px; border-bottom:1px solid var(--line); background:var(--panel); gap:14px; flex-wrap:wrap; }
+  .health { display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  .health .h { font-size:12px; color:var(--mut); }
+  .health .h b { color:var(--fg); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+
+  #content { flex:1; overflow-y:auto; padding:20px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; margin-bottom:18px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .card h3 { color:var(--mut); font-size:11px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; }
+  .card .big { font-size:20px; color:#fff; }
+  .card .sub { color:var(--mut); font-size:11px; margin-top:4px; }
+
+  section.view { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:16px; margin-bottom:16px; }
+  section.view h2 { font-size:14px; margin-bottom:14px; color:#fff; display:flex; align-items:center;
+    justify-content:space-between; gap:10px; flex-wrap:wrap; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:left; padding:7px 9px; border-bottom:1px solid var(--line); }
+  th { color:var(--mut); font-size:11px; text-transform:uppercase; }
+  tr:hover td { background:rgba(79,140,255,.04); }
+  form.f { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; align-items:end; }
+  form.f label { font-size:11px; color:var(--mut); display:flex; flex-direction:column; gap:4px; }
+  .badge { padding:2px 8px; border-radius:10px; font-size:11px; }
+  .badge.on { background:rgba(46,204,113,.15); color:var(--ok); }
+  .badge.off { background:rgba(139,151,181,.15); color:var(--mut); }
+  .badge.warn { background:rgba(241,196,15,.15); color:var(--warn); }
+  .logbox { background:#0d1220; border:1px solid var(--line); border-radius:8px; padding:10px;
+    max-height:420px; overflow:auto; font-size:11px; white-space:pre-wrap; color:#9fb4d8; }
+  #msg { min-height:18px; margin-top:10px; font-size:12px; }
+  .tbar { display:flex; align-items:center; gap:12px; margin-bottom:14px; flex-wrap:wrap; }
+  .pct { font-size:12px; color:var(--mut); }
+  .pct b { color:var(--fg); }
+</style>
+</head>
+<body>
+
+<!-- login -->
+<div id="login">
+  <div class="login-box">
+    <h1>Ubuntu <span style="color:#4f8cff">Router</span></h1>
+    <p>Dashboard manajemen pengganti MikroTik</p>
+    <label>Username<input id="lUser" value="admin"></label>
+    <label>Password<input id="lPass" type="password" placeholder="password admin"></label>
+    <button onclick="doLogin()" style="width:100%">Masuk</button>
+    <div id="msgLogin" class="muted"></div>
+  </div>
+</div>
+
+<div id="app">
+  <aside>
+    <div class="brand"><b>Ubuntu <span>Router</span></b><br><span class="muted" id="identTop">–</span></div>
+    <nav id="nav"></nav>
+    <div class="side-foot" id="sideFoot">–</div>
+  </aside>
+  <main>
+    <header class="topbar">
+      <div style="font-size:13px" id="pageTitle">Dashboard</div>
+      <div class="health" id="health"></div>
+      <button class="ghost mini" onclick="doLogout()">Keluar</button>
+    </header>
+    <div id="content"></div>
+  </main>
+</div>
+
+<p id="msg" class="muted"></p>
+<script src="app.js"></script>
+</body>
+</html>

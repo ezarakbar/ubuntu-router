@@ -1,0 +1,16 @@
+[Unit]
+Description=Ubuntu Router engine (render & apply nft/dnsmasq/tc)
+After=network-online.target dnsmasq.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=APP_DIR=/opt/ubuntu-router
+Environment=LAN_IF=br-lan
+ExecStart=/opt/ubuntu-router/engine/render-nft.sh
+ExecStart=/opt/ubuntu-router/engine/render-dnsmasq.sh
+ExecStart=/opt/ubuntu-router/engine/render-tc.sh
+
+[Install]
+WantedBy=multi-user.target
