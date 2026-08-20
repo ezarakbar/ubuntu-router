@@ -82,10 +82,12 @@ Dashboard FastAPI + SQLite di `dashboard/` — menu meniru struktur RouterOS:
 ```
 Dashboard          ringkasan trafik, pelanggan, lease, CPU/RAM/disk
 Pelanggan         tambah/atur pelanggan (MAC, IP statis/dinamis, profile, aktif/nonaktif)
-Profile           definisi bandwidth (rate down/up kbit, priority) — setara Simple Queue
+Profile           definisi bandwidth (rate down/up kbit, burst, priority) — setara Simple Queue
 IP ▸ DHCP Pool    range DHCP per interface (gateway, DNS, leasetime)
 IP ▸ DHCP Lease   daftar lease aktif dari dnsmasq
-IP ▸ Firewall NAT dstnat (port-forward) & srcnat (masquerade)
+IP ▸ Firewall     NAT, Filter (input/forward/output), Mangle (mark packet/connection),
+                  Address List (nft set utk matcher src-list/dst-list)
+IP ▸ Routing      Policy routing (fwmark → routing table + default route via/interface)
 Interfaces        daftar NIC + alamat + statistik trafik
 System            identity, health, ganti password admin
 Logs              journald viewer
@@ -95,11 +97,16 @@ Setiap perubahan di UI memicu **engine render idempotent** (`dashboard/engine/`)
 
 | Script | Fungsi | Diterapkan ke |
 |---|---|---|
-| `render-nft.sh` | address-list pelanggan + rule NAT (tabel `ip ur_dyn`) | nftables |
+| `render-nft.sh` | address-list pelanggan + rule NAT + filter + mangle (tabel `ip ur_dyn`) | nftables |
 | `render-dnsmasq.sh` | pool DHCP + static lease (`dhcp-host`) per pelanggan | dnsmasq (reload) |
-| `render-tc.sh` | Simple Queue per pelanggan (HTB, DOWN di LAN + UP via ifb) | tc/br-lan |
+| `render-tc.sh` | Simple Queue per pelanggan (HTB + burst, DOWN di LAN + UP via ifb) | tc/br-lan |
+| `render-policy.sh` | `ip rule` fwmark → routing table + default route via/interface | ip rule/route |
 
 **Tag IP per pelanggan (RADAR):** setiap pelanggan aktif otomatis masuk address-list `customers` dan mendapat kelas queue sesuai profile — mirip Simple Queue + address-list MikroTik.
+
+**Firewall penuh:** rule filter (accept/drop/reject/log) per chain input/forward/output dengan matcher IP, port, proto, conn-state, ICMP, limit, dan address-list; mangle untuk mark packet/connection; Address List (IP/CIDR) dibuat via UI dan bisa dipakai sebagai matcher `src-list`/`dst-list`; policy routing memindahkan trafik ber-mark ke tabel routing terpisah.
+
+> Engine idempotent penuh: `render-nft.sh` memakai `nft delete table` lalu terapkan ulang (karena `nft -f` bersifat merge/add dan `flush table` tidak menghapus set/chains); `render-policy.sh` mencatat priority yang diterapkan di state file agar rule lama (yang priority-nya diubah/dihapus) ikut dibersihkan.
 
 ## Menambah pelanggan (contoh)
 
@@ -127,4 +134,5 @@ curl -s -X POST http://<IP>:8081/api/customers \
 - Untuk host yang menjalankan Docker, nftables memakai tabel terpisah (`inet router`) sehingga tidak mengganggu container.
 - `cockpit-networkmanager` terpasang; jika server memakai `systemd-networkd`, halaman Network di Cockpit hanya menampilkan status (disarankan tetap `networkd` agar tidak mengganggu layanan yang berjalan).
 - Dashboard memakai port `8081` (8080/8090 dipakai stack lain). Ubah di `dashboard/ubuntu-router-dashboard.service`.
-- Setelah reboot, `ubuntu-router-engine.service` (oneshot) memulihkan address-list, rule NAT, dan queue secara otomatis.
+- Setelah reboot, `ubuntu-router-engine.service` (oneshot) memulihkan address-list, rule firewall/NAT/mangle, queue, policy routing, dan DHCP secara otomatis.
+- Nama pelanggan otomatis disanitasi untuk `dhcp-host` dnsmasq (hanya `[A-Za-z0-9-]`; spasi diubah/membuang), jadi nama seperti "Pak Budi" aman.

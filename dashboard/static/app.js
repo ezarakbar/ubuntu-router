@@ -80,7 +80,13 @@ const MENU = [
   { grp: "IP" },
   { key: "pools", label: "DHCP — Pool" },
   { key: "leases", label: "DHCP — Lease" },
+  { grp: "IP · Firewall" },
+  { key: "filter", label: "Firewall — Filter" },
   { key: "nat", label: "Firewall — NAT" },
+  { key: "mangle", label: "Firewall — Mangle" },
+  { key: "addrlists", label: "Firewall — Address List" },
+  { grp: "IP · Routing" },
+  { key: "policy", label: "Routing — Policy" },
   { key: "interfaces", label: "Interfaces" },
   { grp: "Sistem" },
   { key: "system", label: "System & Health" },
@@ -228,13 +234,15 @@ async function renderProfiles() {
         <label>Nama<input id="pName" placeholder="7M" required></label>
         <label>Down (kbit)<input id="pDown" type="number" min="64" value="7000"></label>
         <label>Up (kbit)<input id="pUp" type="number" min="64" value="3000"></label>
+        <label>Burst Down (kbit, ops.)<input id="pBurstD" type="number" min="0" value="0" placeholder="0 = tanpa burst"></label>
+        <label>Burst Up (kbit, ops.)<input id="pBurstU" type="number" min="0" value="0" placeholder="0 = tanpa burst"></label>
         <label>Priority<input id="pPri" type="number" value="1"></label>
         <button onclick="addProfile()">Tambah</button>
       </form>
-      <table><thead><tr><th>Nama</th><th>Down</th><th>Up</th><th>≈ Down</th><th>≈ Up</th><th>Pri</th><th>Aksi</th></tr></thead>
+      <table><thead><tr><th>Nama</th><th>Down</th><th>Up</th><th>Burst</th><th>Pri</th><th>Aksi</th></tr></thead>
       <tbody>${p.map(x => `
         <tr><td>${esc(x.name)}</td><td>${fmtNum(x.rate_down_kbit)} kbit</td><td>${fmtNum(x.rate_up_kbit)} kbit</td>
-        <td>${(x.rate_down_kbit / 1000).toFixed(1)} Mbps</td><td>${(x.rate_up_kbit / 1000).toFixed(1)} Mbps</td>
+        <td>${x.burst_down_kbit ? `${fmtNum(x.burst_down_kbit)}/${fmtNum(x.burst_up_kbit)} kbit` : "–"}</td>
         <td>${x.priority}</td>
         <td>
           <button class="ghost mini" onclick="editProfile('${esc(x.name)}')">Ubah</button>
@@ -247,21 +255,23 @@ async function addProfile() {
   const name = document.getElementById("pName").value.trim();
   const d = +document.getElementById("pDown").value;
   const u = +document.getElementById("pUp").value;
+  const bd = +document.getElementById("pBurstD").value || 0;
+  const bu = +document.getElementById("pBurstU").value || 0;
   const pr = +document.getElementById("pPri").value || 1;
   if (!name || !d || !u) return msg("Lengkapi nama & rate");
   try {
-    await api("/profiles", { method: "POST", body: { name, rate_down_kbit: d, rate_up_kbit: u, priority: pr } });
+    await api("/profiles", { method: "POST", body: { name, rate_down_kbit: d, rate_up_kbit: u, burst_down_kbit: bd, burst_up_kbit: bu, priority: pr } });
     msg("Profile ditambahkan", "okmsg"); renderProfiles().catch(() => {});
   } catch (e) { msg(e.message); }
 }
 async function editProfile(name) {
-  const rate = prompt(`Rate baru profile ${name} (kbit down/up)\ncontoh: 7000/3000`);
+  const rate = prompt(`Rate baru profile ${name} (kbit down/up [/burst_down/burst_up])\ncontoh: 7000/3000/10000/5000`);
   if (!rate) return;
-  const [d, u] = rate.split("/").map(Number);
-  if (!d || !u) return msg("Format salah: down/up kbit");
+  const parts = rate.split("/").map(Number);
+  if (parts.length < 2 || !parts[0] || !parts[1]) return msg("Format salah: down/up [/burst]");
   try {
-    await api("/profiles/" + encodeURIComponent(name), { method: "PUT", body: { rate_down_kbit: d, rate_up_kbit: u } });
-    msg(`Profile ${name} -> ${d}/${u} kbit (queue diperbarui)`, "okmsg");
+    await api("/profiles/" + encodeURIComponent(name), { method: "PUT", body: { rate_down_kbit: parts[0], rate_up_kbit: parts[1], burst_down_kbit: parts[2] || 0, burst_up_kbit: parts[3] || 0 } });
+    msg(`Profile ${name} diperbarui (queue ditata ulang)`, "okmsg");
     renderProfiles().catch(() => {});
   } catch (e) { msg(e.message); }
 }
@@ -507,6 +517,289 @@ async function renderLogs() {
     </section>`);
 }
 
+/* ---------------- firewall: filter ---------------- */
+async function renderFilter() {
+  const rules = await api("/firewall/filter");
+  const lists = await api("/address-lists");
+  const listOpts = lists.map(l => `<option>${esc(l.name)}</option>`).join("");
+  content(`
+    <section class="view"><h2>Firewall Filter (input/forward/output) <span class="muted">default policy = accept</span></h2>
+      <div class="tbar"><button class="ghost mini" onclick="reloadAll()">↻ Render ulang engine</button></div>
+      <form class="f" onsubmit="return false;">
+        <label>Chain<select id="fChain"><option value="forward">forward</option><option value="input">input</option><option value="output">output</option></select></label>
+        <label>Aksi<select id="fAction"><option value="drop">drop</option><option value="accept">accept</option><option value="reject">reject</option><option value="log">log</option></select></label>
+        <label>Proto<select id="fProto"><option value="">semua</option><option>tcp</option><option>udp</option><option>icmp</option></select></label>
+        <label>Src Addr<input id="fSrc" placeholder="10.10.0.0/24"></label>
+        <label>Dst Addr<input id="fDst" placeholder="10.10.0.1"></label>
+        <label>Src Port<input id="fSport" type="number"></label>
+        <label>Dst Port<input id="fDport" type="number"></label>
+        <label>Src List<select id="fSrcList"><option value="">–</option>${listOpts}</select></label>
+        <label>Dst List<select id="fDstList"><option value="">–</option>${listOpts}</select></label>
+        <label>Conn State<select id="fState"><option value="">–</option><option value="invalid">invalid</option><option value="established,related">established,related</option><option value="new">new</option></select></label>
+        <label>ICMP Type<input id="fIcmp" placeholder="echo-request"></label>
+        <label>Limit<input id="fLimit" placeholder="10/second"></label>
+        <label>Komentar<input id="fComment" placeholder="cth: blokir akses internet"></label>
+        <button onclick="addFilter()">Tambah</button>
+      </form>
+      <table><thead><tr><th>ID</th><th>Chain</th><th>Aksi</th><th>Matcher</th><th>Komentar</th><th>Status</th><th>Aksi</th></tr></thead>
+      <tbody>${rules.map(x => {
+        const parts = [];
+        if (x.proto) parts.push(x.proto);
+        if (x.src_address) parts.push("src " + x.src_address);
+        if (x.dst_address) parts.push("dst " + x.dst_address);
+        if (x.src_port) parts.push("sport " + x.src_port);
+        if (x.dst_port) parts.push("dport " + x.dst_port);
+        if (x.src_list) parts.push("src-list " + x.src_list);
+        if (x.dst_list) parts.push("dst-list " + x.dst_list);
+        if (x.connstate) parts.push("state " + x.connstate);
+        if (x.icmp_type) parts.push("icmp " + x.icmp_type);
+        if (x.limit_rate) parts.push("limit " + x.limit_rate);
+        return `<tr><td>${x.id}</td><td>${esc(x.chain)}</td><td>${esc(x.action)}</td>
+          <td class="muted">${esc(parts.join(" ")) || "–"}</td><td class="muted">${esc(x.comment) || "–"}</td>
+          <td>${badge(x.active, "aktif", "mati")}</td>
+          <td><button class="ghost mini" onclick="toggleFilter(${x.id}, ${x.active ? 0 : 1})">${x.active ? "Nonaktif" : "Aktif"}</button>
+              <button class="danger mini" onclick="delFilter(${x.id})">Hapus</button></td></tr>`;
+      }).join("") || '<tr><td colspan="7" class="muted">Belum ada rule</td></tr>'}
+      </tbody></table>
+    </section>`);
+}
+async function addFilter() {
+  const g = id => document.getElementById(id).value;
+  const num = id => { const v = g(id); return v ? +v : null; };
+  const body = {
+    chain: g("fChain"), action: g("fAction"),
+    protocol: g("fProto") || null,
+    src_address: g("fSrc").trim() || null, dst_address: g("fDst").trim() || null,
+    src_port: num("fSport"), dst_port: num("fDport"),
+    src_list: g("fSrcList") || null, dst_list: g("fDstList") || null,
+    connstate: g("fState") || null, icmp_type: g("fIcmp").trim() || null,
+    limit_rate: g("fLimit").trim() || null,
+    comment: g("fComment").trim() || null,
+  };
+  if (body.action === "drop" && !body.src_address && !body.dst_address && !body.src_list && !body.dst_list && !body.protocol)
+    return msg("Hati-hati: drop tanpa matcher akan memblokir SEMUA lalu lintas chain tsb. Isi matcher dulu.");
+  try {
+    await api("/firewall/filter", { method: "POST", body });
+    msg("Rule filter ditambahkan & diterapkan", "okmsg"); renderFilter().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function toggleFilter(id, active) {
+  try {
+    await api("/firewall/filter/" + id, { method: "PUT", body: { active } });
+    msg("Rule #" + id + " " + (active ? "diaktifkan" : "dinonaktifkan"), "okmsg");
+    renderFilter().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function delFilter(id) {
+  if (!confirm("Hapus rule filter #" + id + "?")) return;
+  try {
+    await api("/firewall/filter/" + id, { method: "DELETE" });
+    msg("Rule filter dihapus", "okmsg"); renderFilter().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+
+/* ---------------- firewall: mangle ---------------- */
+async function renderMangle() {
+  const rules = await api("/firewall/mangle");
+  const lists = await api("/address-lists");
+  const listOpts = lists.map(l => `<option>${esc(l.name)}</option>`).join("");
+  content(`
+    <section class="view"><h2>Mangle (mark packet/connection) <span class="muted">untuk policy routing</span></h2>
+      <div class="tbar"><button class="ghost mini" onclick="reloadAll()">↻ Render ulang engine</button></div>
+      <form class="f" onsubmit="return false;">
+        <label>Chain<select id="mChain">
+          <option value="prerouting">prerouting</option><option value="input">input</option>
+          <option value="forward">forward</option><option value="output">output</option><option value="postrouting">postrouting</option>
+        </select></label>
+        <label>Aksi<select id="mAction"><option value="mark_packet">mark_packet</option><option value="mark_connection">mark_connection</option><option value="accept">accept</option><option value="drop">drop</option></select></label>
+        <label>Mark<select id="mMark">
+          <option value="16">0x10 (16)</option><option value="32">0x20 (32)</option>
+          <option value="64">0x40 (64)</option><option value="128">0x80 (128)</option>
+        </select></label>
+        <label>Proto<select id="mProto"><option value="">semua</option><option>tcp</option><option>udp</option></select></label>
+        <label>Src Addr<input id="mSrc" placeholder="10.10.0.0/24"></label>
+        <label>Dst Addr<input id="mDst" placeholder="192.168.96.3"></label>
+        <label>Src Port<input id="mSport" type="number"></label>
+        <label>Dst Port<input id="mDport" type="number"></label>
+        <label>Src List<select id="mSrcList"><option value="">–</option>${listOpts}</select></label>
+        <label>Dst List<select id="mDstList"><option value="">–</option>${listOpts}</select></label>
+        <label>Komentar<input id="mComment" placeholder="cth: tandai trafik download"></label>
+        <button onclick="addMangle()">Tambah</button>
+      </form>
+      <table><thead><tr><th>ID</th><th>Chain</th><th>Aksi</th><th>Mark</th><th>Matcher</th><th>Komentar</th><th>Status</th><th>Aksi</th></tr></thead>
+      <tbody>${rules.map(x => {
+        const parts = [];
+        if (x.proto) parts.push(x.proto);
+        if (x.src_address) parts.push("src " + x.src_address);
+        if (x.dst_address) parts.push("dst " + x.dst_address);
+        if (x.src_port) parts.push("sport " + x.src_port);
+        if (x.dst_port) parts.push("dport " + x.dst_port);
+        if (x.src_list) parts.push("src-list " + x.src_list);
+        if (x.dst_list) parts.push("dst-list " + x.dst_list);
+        return `<tr><td>${x.id}</td><td>${esc(x.chain)}</td><td>${esc(x.action)}</td>
+          <td>${x.mark != null ? "0x" + Number(x.mark).toString(16) : "–"}</td>
+          <td class="muted">${esc(parts.join(" ")) || "–"}</td><td class="muted">${esc(x.comment) || "–"}</td>
+          <td>${badge(x.active, "aktif", "mati")}</td>
+          <td><button class="ghost mini" onclick="toggleMangle(${x.id}, ${x.active ? 0 : 1})">${x.active ? "Nonaktif" : "Aktif"}</button>
+              <button class="danger mini" onclick="delMangle(${x.id})">Hapus</button></td></tr>`;
+      }).join("") || '<tr><td colspan="8" class="muted">Belum ada rule</td></tr>'}
+      </tbody></table>
+    </section>`);
+}
+async function addMangle() {
+  const g = id => document.getElementById(id).value;
+  const num = id => { const v = g(id); return v ? +v : null; };
+  const body = {
+    chain: g("mChain"), action: g("mAction"),
+    mark: g("mMark") ? +g("mMark") : null,
+    protocol: g("mProto") || null,
+    src_address: g("mSrc").trim() || null, dst_address: g("mDst").trim() || null,
+    src_port: num("mSport"), dst_port: num("mDport"),
+    src_list: g("mSrcList") || null, dst_list: g("mDstList") || null,
+    comment: g("mComment").trim() || null,
+  };
+  try {
+    await api("/firewall/mangle", { method: "POST", body });
+    msg("Rule mangle ditambahkan & diterapkan", "okmsg"); renderMangle().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function toggleMangle(id, active) {
+  try {
+    await api("/firewall/mangle/" + id, { method: "PUT", body: { active } });
+    msg("Rule #" + id + " " + (active ? "diaktifkan" : "dinonaktifkan"), "okmsg");
+    renderMangle().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function delMangle(id) {
+  if (!confirm("Hapus rule mangle #" + id + "?")) return;
+  try {
+    await api("/firewall/mangle/" + id, { method: "DELETE" });
+    msg("Rule mangle dihapus", "okmsg"); renderMangle().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+
+/* ---------------- firewall: address lists ---------------- */
+async function renderAddrLists() {
+  const lists = await api("/address-lists");
+  content(`
+    <section class="view"><h2>Address List (nft set) <span class="muted">dipakai matcher src-list/dst-list</span></h2>
+      <div class="tbar"><button class="ghost mini" onclick="reloadAll()">↻ Render ulang engine</button></div>
+      <form class="f" onsubmit="return false;">
+        <label>Nama List<input id="alName" placeholder="cth: blocked" required></label>
+        <label>Komentar<input id="alComment"></label>
+        <button onclick="addAddrList()">Buat List</button>
+      </form>
+      <table><thead><tr><th>Nama</th><th>Isi (IP/CIDR)</th><th>Komentar</th><th>Aksi</th></tr></thead>
+      <tbody>${lists.map(l => `
+        <tr><td><b>${esc(l.name)}</b></td>
+          <td>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:4px">
+              <input id="alNew_${l.id}" placeholder="10.10.0.99" style="max-width:160px">
+              <button class="ghost mini" onclick="addListEntry(${l.id})">+</button>
+            </div>
+            <div class="muted">${(l.entries || []).map(e =>
+              `<span style="display:inline-block;background:#0d1220;border:1px solid var(--line);border-radius:10px;padding:1px 8px;margin:2px">${esc(e.address)} <a style="cursor:pointer;color:var(--bad)" onclick="delListEntry(${l.id}, ${e.id})">✕</a></span>`).join(" ") || "— kosong —"}</div>
+          </td>
+          <td class="muted">${esc(l.comment) || "–"}</td>
+          <td><button class="danger mini" onclick="delAddrList(${l.id})">Hapus List</button></td></tr>`).join("")
+        || '<tr><td colspan="4" class="muted">Belum ada address-list</td></tr>'}
+      </tbody></table>
+    </section>`);
+}
+async function addAddrList() {
+  const name = document.getElementById("alName").value.trim();
+  const cmt = document.getElementById("alComment").value.trim();
+  if (!name) return msg("Nama list wajib");
+  if (!/^[A-Za-z0-9_.]+$/.test(name)) return msg("Nama hanya huruf/angka/underscore");
+  try {
+    await api("/address-lists", { method: "POST", body: { name, comment: cmt || null } });
+    msg("Address-list dibuat", "okmsg"); renderAddrLists().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function addListEntry(listId) {
+  const v = document.getElementById("alNew_" + listId).value.trim();
+  if (!v) return msg("Isi alamat IP/CIDR");
+  try {
+    await api("/address-lists/" + listId + "/entries", { method: "POST", body: { address: v } });
+    msg("Entry ditambahkan & diterapkan", "okmsg"); renderAddrLists().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function delListEntry(listId, entryId) {
+  try {
+    await api(`/address-lists/${listId}/entries/${entryId}`, { method: "DELETE" });
+    msg("Entry dihapus", "okmsg"); renderAddrLists().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function delAddrList(id) {
+  if (!confirm("Hapus address-list #" + id + "?")) return;
+  try {
+    await api("/address-lists/" + id, { method: "DELETE" });
+    msg("Address-list dihapus", "okmsg"); renderAddrLists().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+
+/* ---------------- routing: policy ---------------- */
+async function renderPolicy() {
+  const rules = await api("/policy");
+  content(`
+    <section class="view"><h2>Policy Routing (fwmark → routing table)</h2>
+      <p class="muted" style="margin-bottom:12px">Kombinasi dengan Mangle: tandai paket (cth <code>0x10</code>) lalu atur default route via gateway/interface lain di sini.</p>
+      <div class="tbar"><button class="ghost mini" onclick="reloadAll()">↻ Render ulang engine</button></div>
+      <form class="f" onsubmit="return false;">
+        <label>Mark (fwmark)<select id="poMark">
+          <option value="16">0x10 (16)</option><option value="32">0x20 (32)</option>
+          <option value="64">0x40 (64)</option><option value="128">0x80 (128)</option>
+        </select></label>
+        <label>Tabel Routing<select id="poTable">
+          <option value="100">100</option><option value="200">200</option><option value="300">300</option>
+        </select></label>
+        <label>Via (gateway)<input id="poVia" placeholder="192.168.96.1"></label>
+        <label>Interface<input id="poDev" placeholder="enp6s0"></label>
+        <label>Priority<input id="poPri" type="number" value="5000"></label>
+        <label>Komentar<input id="poComment" placeholder="cth: semua trafik 10.10.0.0/24 via WAN2"></label>
+        <button onclick="addPolicy()">Tambah</button>
+      </form>
+      <table><thead><tr><th>ID</th><th>Mark</th><th>Table</th><th>Via/Dev</th><th>Priority</th><th>Komentar</th><th>Status</th><th>Aksi</th></tr></thead>
+      <tbody>${rules.map(x => `
+        <tr><td>${x.id}</td><td>0x${Number(x.mark).toString(16)}</td><td>${x.table_id}</td>
+        <td>${esc(x.via || "")}${x.dev ? " dev " + esc(x.dev) : ""}</td><td>${x.priority}</td>
+        <td class="muted">${esc(x.comment) || "–"}</td>
+        <td>${badge(x.active, "aktif", "mati")}</td>
+        <td><button class="ghost mini" onclick="togglePolicy(${x.id}, ${x.active ? 0 : 1})">${x.active ? "Nonaktif" : "Aktif"}</button>
+            <button class="danger mini" onclick="delPolicy(${x.id})">Hapus</button></td></tr>`).join("")
+        || '<tr><td colspan="8" class="muted">Belum ada rule</td></tr>'}
+      </tbody></table>
+    </section>`);
+}
+async function addPolicy() {
+  const g = id => document.getElementById(id).value;
+  const body = {
+    mark: +g("poMark"), table_id: +g("poTable"),
+    via: g("poVia").trim() || null, dev: g("poDev").trim() || null,
+    priority: +g("poPri") || 5000,
+    comment: g("poComment").trim() || null,
+  };
+  if (!body.via && !body.dev) return msg("Isi Via (gateway) atau Interface");
+  try {
+    await api("/policy", { method: "POST", body });
+    msg("Policy route ditambahkan & diterapkan", "okmsg"); renderPolicy().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function togglePolicy(id, active) {
+  try {
+    await api("/policy/" + id, { method: "PUT", body: { active } });
+    msg("Rule #" + id + " " + (active ? "diaktifkan" : "dinonaktifkan"), "okmsg");
+    renderPolicy().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+async function delPolicy(id) {
+  if (!confirm("Hapus policy route #" + id + "?")) return;
+  try {
+    await api("/policy/" + id, { method: "DELETE" });
+    msg("Policy route dihapus", "okmsg"); renderPolicy().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+
 /* ---------------- router ---------------- */
 const RENDER = {
   dashboard: renderDashboard,
@@ -515,6 +808,10 @@ const RENDER = {
   pools: renderPools,
   leases: renderLeases,
   nat: renderNat,
+  filter: renderFilter,
+  mangle: renderMangle,
+  addrlists: renderAddrLists,
+  policy: renderPolicy,
   interfaces: renderInterfaces,
   system: renderSystem,
   logs: renderLogs,

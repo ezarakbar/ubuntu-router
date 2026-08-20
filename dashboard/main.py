@@ -108,6 +108,66 @@ def init_db():
             position INTEGER,
             created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS address_lists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            comment TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS address_list_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            list_id INTEGER NOT NULL REFERENCES address_lists(id) ON DELETE CASCADE,
+            address TEXT NOT NULL,
+            comment TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS firewall_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chain TEXT NOT NULL DEFAULT 'forward',
+            action TEXT NOT NULL DEFAULT 'drop',
+            proto TEXT,
+            src_address TEXT,
+            dst_address TEXT,
+            src_port INTEGER,
+            dst_port INTEGER,
+            src_list TEXT,
+            dst_list TEXT,
+            connstate TEXT,
+            icmp_type TEXT,
+            limit_rate TEXT,
+            comment TEXT,
+            active INTEGER DEFAULT 1,
+            position INTEGER,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS mangle_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chain TEXT NOT NULL DEFAULT 'prerouting',
+            action TEXT NOT NULL DEFAULT 'mark_packet',
+            mark INTEGER,
+            proto TEXT,
+            src_address TEXT,
+            dst_address TEXT,
+            src_port INTEGER,
+            dst_port INTEGER,
+            src_list TEXT,
+            dst_list TEXT,
+            comment TEXT,
+            active INTEGER DEFAULT 1,
+            position INTEGER,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS policy_routes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mark INTEGER NOT NULL,
+            table_id INTEGER NOT NULL,
+            priority INTEGER DEFAULT 5000,
+            via TEXT,
+            dev TEXT,
+            comment TEXT,
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -193,6 +253,7 @@ def apply_all():
     run_engine("render-nft.sh")
     run_engine("render-dnsmasq.sh")
     run_engine("render-tc.sh")
+    run_engine("render-policy.sh")
 
 
 # --------------------------------------------------------------------------
@@ -408,6 +469,99 @@ class NatRuleUpdate(BaseModel):
 
 class MasqueradeReq(BaseModel):
     enabled: bool
+
+
+class FwRuleCreate(BaseModel):
+    chain: str = "forward"
+    action: str = "drop"
+    protocol: Optional[str] = None
+    src_address: Optional[str] = None
+    dst_address: Optional[str] = None
+    src_port: Optional[int] = None
+    dst_port: Optional[int] = None
+    src_list: Optional[str] = None
+    dst_list: Optional[str] = None
+    connstate: Optional[str] = None
+    icmp_type: Optional[str] = None
+    limit_rate: Optional[str] = None
+    comment: Optional[str] = None
+    position: Optional[int] = None
+
+
+class FwRuleUpdate(BaseModel):
+    chain: Optional[str] = None
+    action: Optional[str] = None
+    protocol: Optional[str] = None
+    src_address: Optional[str] = None
+    dst_address: Optional[str] = None
+    src_port: Optional[int] = None
+    dst_port: Optional[int] = None
+    src_list: Optional[str] = None
+    dst_list: Optional[str] = None
+    connstate: Optional[str] = None
+    icmp_type: Optional[str] = None
+    limit_rate: Optional[str] = None
+    comment: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class MangleCreate(BaseModel):
+    chain: str = "prerouting"
+    action: str = "mark_packet"
+    mark: Optional[int] = None
+    protocol: Optional[str] = None
+    src_address: Optional[str] = None
+    dst_address: Optional[str] = None
+    src_port: Optional[int] = None
+    dst_port: Optional[int] = None
+    src_list: Optional[str] = None
+    dst_list: Optional[str] = None
+    comment: Optional[str] = None
+    position: Optional[int] = None
+
+
+class MangleUpdate(BaseModel):
+    chain: Optional[str] = None
+    action: Optional[str] = None
+    mark: Optional[int] = None
+    protocol: Optional[str] = None
+    src_address: Optional[str] = None
+    dst_address: Optional[str] = None
+    src_port: Optional[int] = None
+    dst_port: Optional[int] = None
+    src_list: Optional[str] = None
+    dst_list: Optional[str] = None
+    comment: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class AddrListCreate(BaseModel):
+    name: str
+    comment: Optional[str] = None
+
+
+class AddrListEntry(BaseModel):
+    address: str
+    comment: Optional[str] = None
+
+
+class PolicyCreate(BaseModel):
+    mark: int
+    table_id: int
+    priority: int = 5000
+    via: Optional[str] = None
+    dev: Optional[str] = None
+    comment: Optional[str] = None
+
+
+class PolicyUpdate(BaseModel):
+    mark: Optional[int] = None
+    table_id: Optional[int] = None
+    priority: Optional[int] = None
+    via: Optional[str] = None
+    dev: Optional[str] = None
+    comment: Optional[str] = None
+    active: Optional[bool] = None
 
 
 class IdentityUpdate(BaseModel):
@@ -883,6 +1037,363 @@ def set_masquerade(m: MasqueradeReq):
     except HTTPException as e:
         raise HTTPException(500, e.detail)
     return {"ok": True, "enabled": m.enabled}
+
+
+# --------------------------------------------------------------------------
+# Firewall filter
+# --------------------------------------------------------------------------
+def fw_validate(chain, action):
+    if chain not in ("input", "forward", "output"):
+        raise HTTPException(400, "chain harus input/forward/output")
+    if action not in ("accept", "drop", "reject", "log"):
+        raise HTTPException(400, "action harus accept/drop/reject/log")
+
+
+@app.get("/api/firewall/filter", dependencies=[Depends(check_auth)])
+def list_filter():
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM firewall_rules ORDER BY position IS NULL, position, id"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/firewall/filter", dependencies=[Depends(check_auth)])
+def add_filter(r: FwRuleCreate):
+    fw_validate(r.chain, r.action)
+    conn = db()
+    if r.position is not None:
+        conn.execute(
+            "UPDATE firewall_rules SET position=position+1 "
+            "WHERE position IS NOT NULL AND position>=?", (r.position,)
+        )
+    cur = conn.execute(
+        "INSERT INTO firewall_rules(chain, action, proto, src_address, dst_address, "
+        "src_port, dst_port, src_list, dst_list, connstate, icmp_type, limit_rate, "
+        "comment, position) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (r.chain, r.action, r.protocol, r.src_address, r.dst_address,
+         r.src_port, r.dst_port, r.src_list, r.dst_list, r.connstate,
+         r.icmp_type, r.limit_rate, r.comment, r.position),
+    )
+    conn.commit()
+    conn.close()
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"id": cur.lastrowid, **r.model_dump()}
+
+
+@app.put("/api/firewall/filter/{rule_id}", dependencies=[Depends(check_auth)])
+def update_filter(rule_id: int, r: FwRuleUpdate):
+    conn = db()
+    row = conn.execute("SELECT * FROM firewall_rules WHERE id=?", (rule_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "rule tidak ada")
+    if r.chain is not None or r.action is not None:
+        fw_validate(r.chain or row["chain"], r.action or row["action"])
+    fields, vals = [], []
+    for col, val in (
+        ("chain", r.chain), ("action", r.action), ("proto", r.protocol),
+        ("src_address", r.src_address), ("dst_address", r.dst_address),
+        ("src_port", r.src_port), ("dst_port", r.dst_port),
+        ("src_list", r.src_list), ("dst_list", r.dst_list),
+        ("connstate", r.connstate), ("icmp_type", r.icmp_type),
+        ("limit_rate", r.limit_rate), ("comment", r.comment),
+    ):
+        if val is not None:
+            fields.append(f"{col}=?"); vals.append(val)
+    if r.active is not None:
+        fields.append("active=?"); vals.append(1 if r.active else 0)
+    if fields:
+        conn.execute(
+            f"UPDATE firewall_rules SET {', '.join(fields)} WHERE id=?", (*vals, rule_id)
+        )
+        conn.commit()
+    conn.close()
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True, "id": rule_id}
+
+
+@app.delete("/api/firewall/filter/{rule_id}", dependencies=[Depends(check_auth)])
+def delete_filter(rule_id: int):
+    conn = db()
+    cur = conn.execute("DELETE FROM firewall_rules WHERE id=?", (rule_id,))
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(404, "rule tidak ada")
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# Mangle
+# --------------------------------------------------------------------------
+@app.get("/api/firewall/mangle", dependencies=[Depends(check_auth)])
+def list_mangle():
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM mangle_rules ORDER BY position IS NULL, position, id"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/firewall/mangle", dependencies=[Depends(check_auth)])
+def add_mangle(r: MangleCreate):
+    if r.action not in ("mark_packet", "mark_connection", "accept", "drop"):
+        raise HTTPException(400, "action tidak dikenal")
+    if r.action.startswith("mark") and r.mark is None:
+        raise HTTPException(400, "mark wajib diisi (cth 0x10 / 16)")
+    conn = db()
+    if r.position is not None:
+        conn.execute(
+            "UPDATE mangle_rules SET position=position+1 "
+            "WHERE position IS NOT NULL AND position>=?", (r.position,)
+        )
+    cur = conn.execute(
+        "INSERT INTO mangle_rules(chain, action, mark, proto, src_address, dst_address, "
+        "src_port, dst_port, src_list, dst_list, comment, position) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (r.chain, r.action, r.mark, r.protocol, r.src_address, r.dst_address,
+         r.src_port, r.dst_port, r.src_list, r.dst_list, r.comment, r.position),
+    )
+    conn.commit()
+    conn.close()
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"id": cur.lastrowid, **r.model_dump()}
+
+
+@app.put("/api/firewall/mangle/{rule_id}", dependencies=[Depends(check_auth)])
+def update_mangle(rule_id: int, r: MangleUpdate):
+    conn = db()
+    row = conn.execute("SELECT * FROM mangle_rules WHERE id=?", (rule_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "rule tidak ada")
+    fields, vals = [], []
+    for col, val in (
+        ("chain", r.chain), ("action", r.action), ("mark", r.mark),
+        ("proto", r.protocol), ("src_address", r.src_address),
+        ("dst_address", r.dst_address), ("src_port", r.src_port),
+        ("dst_port", r.dst_port), ("src_list", r.src_list),
+        ("dst_list", r.dst_list), ("comment", r.comment),
+    ):
+        if val is not None:
+            fields.append(f"{col}=?"); vals.append(val)
+    if r.active is not None:
+        fields.append("active=?"); vals.append(1 if r.active else 0)
+    if fields:
+        conn.execute(
+            f"UPDATE mangle_rules SET {', '.join(fields)} WHERE id=?", (*vals, rule_id)
+        )
+        conn.commit()
+    conn.close()
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True, "id": rule_id}
+
+
+@app.delete("/api/firewall/mangle/{rule_id}", dependencies=[Depends(check_auth)])
+def delete_mangle(rule_id: int):
+    conn = db()
+    cur = conn.execute("DELETE FROM mangle_rules WHERE id=?", (rule_id,))
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(404, "rule tidak ada")
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# Address Lists
+# --------------------------------------------------------------------------
+def list_known_lists():
+    conn = db()
+    names = {r["name"] for r in conn.execute("SELECT name FROM address_lists")}
+    for t, col in (("firewall_rules", "src_list"), ("firewall_rules", "dst_list"),
+                   ("mangle_rules", "src_list"), ("mangle_rules", "dst_list")):
+        for r in conn.execute(f"SELECT {col} v FROM {t} WHERE {col} IS NOT NULL AND {col}!=''"):
+            if r["v"]:
+                names.add(r["v"])
+    conn.close()
+    return sorted(names)
+
+
+@app.get("/api/address-lists", dependencies=[Depends(check_auth)])
+def get_address_lists():
+    conn = db()
+    lists = conn.execute("SELECT * FROM address_lists ORDER BY id").fetchall()
+    out = []
+    for l in lists:
+        entries = conn.execute(
+            "SELECT * FROM address_list_entries WHERE list_id=? ORDER BY id",
+            (l["id"],),
+        ).fetchall()
+        out.append({**dict(l), "entries": [dict(e) for e in entries]})
+    conn.close()
+    return out
+
+
+@app.post("/api/address-lists", dependencies=[Depends(check_auth)])
+def create_address_list(al: AddrListCreate):
+    conn = db()
+    try:
+        cur = conn.execute(
+            "INSERT INTO address_lists(name, comment) VALUES (?,?)",
+            (al.name, al.comment),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        raise HTTPException(400, "nama address-list sudah ada")
+    finally:
+        conn.close()
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"id": cur.lastrowid, "ok": True, "name": al.name}
+
+
+@app.delete("/api/address-lists/{list_id}", dependencies=[Depends(check_auth)])
+def delete_address_list(list_id: int):
+    conn = db()
+    cur = conn.execute("DELETE FROM address_lists WHERE id=?", (list_id,))
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(404, "list tidak ada")
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True}
+
+
+@app.post("/api/address-lists/{list_id}/entries", dependencies=[Depends(check_auth)])
+def add_list_entry(list_id: int, e: AddrListEntry):
+    conn = db()
+    if not conn.execute("SELECT id FROM address_lists WHERE id=?", (list_id,)).fetchone():
+        conn.close()
+        raise HTTPException(404, "list tidak ada")
+    conn.execute(
+        "INSERT INTO address_list_entries(list_id, address, comment) VALUES (?,?,?)",
+        (list_id, e.address, e.comment),
+    )
+    conn.commit()
+    conn.close()
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True}
+
+
+@app.delete("/api/address-lists/{list_id}/entries/{entry_id}", dependencies=[Depends(check_auth)])
+def delete_list_entry(list_id: int, entry_id: int):
+    conn = db()
+    cur = conn.execute(
+        "DELETE FROM address_list_entries WHERE id=? AND list_id=?", (entry_id, list_id)
+    )
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(404, "entry tidak ada")
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# Policy routing
+# --------------------------------------------------------------------------
+@app.get("/api/policy", dependencies=[Depends(check_auth)])
+def list_policy():
+    conn = db()
+    rows = conn.execute("SELECT * FROM policy_routes ORDER BY priority, id").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/policy", dependencies=[Depends(check_auth)])
+def add_policy(p: PolicyCreate):
+    conn = db()
+    cur = conn.execute(
+        "INSERT INTO policy_routes(mark, table_id, priority, via, dev, comment) "
+        "VALUES (?,?,?,?,?,?)",
+        (p.mark, p.table_id, p.priority, p.via or None, p.dev or None, p.comment),
+    )
+    conn.commit()
+    conn.close()
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"id": cur.lastrowid, **p.model_dump()}
+
+
+@app.put("/api/policy/{rule_id}", dependencies=[Depends(check_auth)])
+def update_policy(rule_id: int, p: PolicyUpdate):
+    conn = db()
+    row = conn.execute("SELECT * FROM policy_routes WHERE id=?", (rule_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "rule tidak ada")
+    fields, vals = [], []
+    for col, val in (
+        ("mark", p.mark), ("table_id", p.table_id), ("priority", p.priority),
+        ("via", p.via), ("dev", p.dev), ("comment", p.comment),
+    ):
+        if val is not None:
+            fields.append(f"{col}=?"); vals.append(val)
+    if p.active is not None:
+        fields.append("active=?"); vals.append(1 if p.active else 0)
+    if fields:
+        conn.execute(
+            f"UPDATE policy_routes SET {', '.join(fields)} WHERE id=?", (*vals, rule_id)
+        )
+        conn.commit()
+    conn.close()
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True}
+
+
+@app.delete("/api/policy/{rule_id}", dependencies=[Depends(check_auth)])
+def delete_policy(rule_id: int):
+    conn = db()
+    cur = conn.execute("DELETE FROM policy_routes WHERE id=?", (rule_id,))
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(404, "rule tidak ada")
+    try:
+        apply_all()
+    except HTTPException as e:
+        raise HTTPException(500, e.detail)
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------

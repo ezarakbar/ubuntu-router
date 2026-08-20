@@ -30,19 +30,21 @@ lease_ip() {
 
 # kumpulkan pelanggan aktif dengan IP efektif
 rows=$(sqlite3 -separator '|' "$DB" \
-  "SELECT c.name, lower(c.mac), COALESCE(c.static_ip,''), p.rate_down_kbit, p.rate_up_kbit
+  "SELECT c.name, lower(c.mac), COALESCE(c.static_ip,''), p.rate_down_kbit, p.rate_up_kbit, COALESCE(p.burst_down_kbit,0), COALESCE(p.burst_up_kbit,0)
    FROM customers c JOIN profiles p ON p.id=c.profile_id
    WHERE c.active=1 AND c.type='dhcp' ORDER BY c.id;" 2>/dev/null || true)
 
-declare -A DOWN UP
+declare -A DOWN UP BDOWN BUP
 n=0
-while IFS='|' read -r name mac ip down up; do
+while IFS='|' read -r name mac ip down up bd bu; do
     [ -n "$name" ] || continue
     eff="$ip"
     [ -n "$eff" ] || eff=$(lease_ip "$mac")
     [ -n "$eff" ] || continue
     DOWN["$eff"]="${down:-1000}"
     UP["$eff"]="${up:-1000}"
+    BDOWN["$eff"]="${bd:-0}"
+    BUP["$eff"]="${bu:-0}"
     n=$((n+1))
 done <<< "$rows"
 
@@ -84,10 +86,14 @@ fi
         id=$((id+1))
         down="${DOWN[$ip]}"
         up="${UP[$ip]}"
+        bd="${BDOWN[$ip]}"
+        bu="${BUP[$ip]}"
+        [ "$bd" -gt 0 ] 2>/dev/null && dburst=" burst ${bd}k cburst ${bd}k" || dburst=""
+        [ "$bu" -gt 0 ] 2>/dev/null && uburst=" burst ${bu}k cburst ${bu}k" || uburst=""
         echo "# $ip"
-        echo "tc class add dev \$LAN_IF parent 1: classid 1:$id htb rate ${down}kbit ceil ${down}kbit"
+        echo "tc class add dev \$LAN_IF parent 1: classid 1:$id htb rate ${down}kbit ceil ${down}kbit$dburst"
         echo "tc filter add dev \$LAN_IF parent 1: protocol ip prio $id u32 match ip dst $ip flowid 1:$id"
-        echo "tc class add dev \$IFB parent 1: classid 1:$id htb rate ${up}kbit ceil ${up}kbit"
+        echo "tc class add dev \$IFB parent 1: classid 1:$id htb rate ${up}kbit ceil ${up}kbit$uburst"
         echo "tc filter add dev \$IFB parent 1: protocol ip prio $id u32 match ip src $ip flowid 1:$id"
     done
 } > "$OUT"

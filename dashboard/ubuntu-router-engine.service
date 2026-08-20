@@ -11,6 +11,7 @@ Environment=LAN_IF=br-lan
 ExecStart=/opt/ubuntu-router/engine/render-nft.sh
 ExecStart=/opt/ubuntu-router/engine/render-dnsmasq.sh
 ExecStart=/opt/ubuntu-router/engine/render-tc.sh
+ExecStart=/opt/ubuntu-router/engine/render-policy.sh
 
 [Install]
 WantedBy=multi-user.target

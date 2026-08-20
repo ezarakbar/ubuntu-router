@@ -42,8 +42,8 @@ cp "$APP/dashboard/ubuntu-router-engine.service" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable ubuntu-router-engine.service >/dev/null 2>&1
 
-echo "==> engine inisial (nft, dnsmasq, tc)"
-for e in render-nft.sh render-dnsmasq.sh render-tc.sh; do
+echo "==> engine inisial (nft, dnsmasq, tc, policy)"
+for e in render-nft.sh render-dnsmasq.sh render-tc.sh render-policy.sh; do
     echo "    - $e"
     APP_DIR="$APP" LAN_IF="${LAN_IF:-br-lan}" bash "$APP/engine/$e" || echo "    ! $e dilewati (belum sesuai topologi)"
 done

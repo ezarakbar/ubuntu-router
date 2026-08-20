@@ -44,7 +44,10 @@ mkdir -p "$GEN"
     | while IFS='|' read -r mac ip host; do
         # normalisasi ke format xx:xx:xx:xx:xx:xx (dnsmasq dhcp-host)
         norm=$(echo "$mac" | sed 's/\(..\)/\1:/g;s/:$//')
-        echo "dhcp-host=$norm,$ip,$host"
+        # hostname dnsmasq hanya boleh [A-Za-z0-9-] — sanitasi spasi/karakter lain
+        hostname=$(echo "$host" | tr -cd 'A-Za-z0-9-')
+        [ -n "$hostname" ] || hostname="host-$(echo "$ip" | tr -cd '0-9')"
+        echo "dhcp-host=$norm,$ip,$hostname"
     done
 
     } > "$OUT"
