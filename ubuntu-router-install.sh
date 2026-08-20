@@ -22,7 +22,8 @@
 # Pakai:  curl -sL <RAW_URL> | sudo bash
 # Env:    VLAN_ID, LAN_SUBNET, LAN_IP, DHCP_RANGE, WG_SUBNET, WG_PORT,
 #         WAN_BANDWIDTH, DNS_UPSTREAM, EXTRA_OPEN_PORTS, WAN_IFACE,
-#         LAN_IFACE, DRY_RUN, SDR_LAB_SETUP_SCRIPT
+#         LAN_IFACE, DRY_RUN, SDR_LAB_SETUP_SCRIPT, DEPLOY_DASHBOARD,
+#         GITHUB_URL
 # ============================================================================
 
 set -euo pipefail
@@ -577,6 +578,31 @@ EOF
     fi
 }
 optional_hook
+
+# --------------------- dashboard manajemen (pengganti MikroTik) -----------
+# Mengklon repo ini lalu menjalankan deploy-dashboard.sh (FastAPI + engine).
+# Matikan dengan DEPLOY_DASHBOARD=0
+deploy_dashboard() {
+    log "==> Dashboard manajemen (pengganti MikroTik Webfig/Winbox)"
+    [ "${DEPLOY_DASHBOARD:-1}" = "1" ] || { log "    dilewati (DEPLOY_DASHBOARD=0)"; return; }
+    if [ -n "$GITHUB_URL" ]; then
+        log "    sumber: $GITHUB_URL"
+    fi
+    command -v git >/dev/null 2>&1 || apt-get install -y -q git >>"$LOG" 2>&1 || true
+    SRC=/tmp/ubuntu-router-src
+    rm -rf "$SRC"
+    if git clone -q --depth 1 "${GITHUB_URL:-https://github.com/ezarakbar/ubuntu-router}" "$SRC" 2>>"$LOG"; then
+        if bash "$SRC/dashboard/deploy-dashboard.sh" >>"$LOG" 2>&1; then
+            log "    Dashboard aktif: http://<IP-server>:8081 (admin / admin123 — WAJIB ganti!)"
+        else
+            log "    ! Dashboard gagal deploy — lihat $LOG"
+        fi
+    else
+        log "    ! Gagal clone repo — dashboard dilewati"
+    fi
+    rm -rf "$SRC"
+}
+deploy_dashboard
 
 # ------------------------------ ringkasan ----------------------------------
 summary() {

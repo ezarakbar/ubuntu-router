@@ -21,6 +21,8 @@ Installer satu-perintah untuk mengubah **Ubuntu/Debian Server** menjadi **router
 curl -sL https://raw.githubusercontent.com/ezarakbar/ubuntu-router/main/ubuntu-router-install.sh | sudo bash
 ```
 
+Setelah selesai, installer otomatis **mengklon repo ini dan memasang dashboard manajemen** (FastAPI, port `8081`). Matikan dengan env `DEPLOY_DASHBOARD=0`.
+
 ## Topologi otomatis
 
 Script mendeteksi NIC fisik secara otomatis:
