@@ -111,6 +111,8 @@ Setiap perubahan di UI memicu **engine render idempotent** (`dashboard/engine/`)
 
 **VPN — OpenVPN (GUI):** halaman `IP · Tunnel → OpenVPN` menampilkan status service (aktif/boot, traffic TUN, IP peer) dan form edit konfigurasi `router.conf` (port, proto, dev, IP server/client, cipher, auth, keepalive, verb). Perubahan ditulis lalu service `openvpn-server@router` direstart. Tombol nyala/mati mengontrol service + enable boot. Tersedia unduhan `client.ovpn` (mode static-key) yang sudah berisi key inline + `remote <public-ip> <port>` (IP publik dideteksi otomatis dari default route).
 
+**VPN — IPsec (GUI):** halaman `IP · Tunnel → IPsec (IKEv2)` menampilkan status daemon strongSwan (uptime, pool virtual IP, alamat listen, SA up/connecting) dan daftar koneksi (`site-to-site`, `remote-access`) dari `ipsec.conf`. Tiap koneksi bisa diedit (auto, leftsubnet, right, rightsubnet, rightsourceip, rightdns) dan diisi PSK-nya (ditulis ke `ipsec.secrets`, nilai tidak pernah dikirim balik ke UI). Simpan memakai `ipsec reload` sehingga SA yang berjalan tidak terputus; tombol nyala/mati mengontrol service.
+
 > Engine idempotent penuh: `render-nft.sh` memakai `nft delete table` lalu terapkan ulang (karena `nft -f` bersifat merge/add dan `flush table` tidak menghapus set/chains); `render-policy.sh` mencatat priority yang diterapkan di state file agar rule lama (yang priority-nya diubah/dihapus) ikut dibersihkan.
 
 ## Menambah pelanggan (contoh)

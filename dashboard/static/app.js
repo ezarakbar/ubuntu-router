@@ -90,6 +90,7 @@ const MENU = [
   { grp: "IP · Tunnel" },
   { key: "wireguard", label: "Tunnel — WireGuard" },
   { key: "openvpn", label: "Tunnel — OpenVPN" },
+  { key: "ipsec", label: "Tunnel — IPsec (IKEv2)" },
   { key: "interfaces", label: "Interfaces" },
   { grp: "Sistem" },
   { key: "system", label: "System & Health" },
@@ -1017,6 +1018,79 @@ async function toggleOpenvpn(active) {
   } catch (e) { msg(e.message); }
 }
 
+/* ---------------- ipsec ---------------- */
+async function renderIpsec() {
+  let d = {};
+  try { d = await api("/ipsec"); } catch (e) { msg(e.message); }
+  const s = d.service || {};
+  content(`
+    <section class="view"><h2>IPsec — strongSwan
+      <span>${badge(s.active, "aktif", "mati")}
+        <button class="ghost mini" onclick="toggleIpsec(${s.active ? 0 : 1})">${s.active ? "Matikan" : "Nyalakan"}</button>
+      </span>
+    </h2>
+    <table><tbody>
+      <tr><td class="muted">Uptime daemon</td><td>${esc(d.uptime || "–")}</td></tr>
+      <tr><td class="muted">Security Associations</td><td>${d.sas_up} up / ${d.sas_connecting} connecting</td></tr>
+      <tr><td class="muted">Pool virtual IP</td><td>${(d.pools || []).map(p => `${esc(p.net)} (${p.online}/${p.size} terpakai)`).join("; ") || "–"}</td></tr>
+      <tr><td class="muted">Alamat listen</td><td>${(d.listening || []).join(", ") || "–"}</td></tr>
+    </tbody></table>
+    ${(d.sa_list || []).map(sa => `<p class="okmsg">SA <b>${esc(sa.conn)}</b> ESTABLISHED → ${esc(sa.peer)}</p>`).join("")}
+    </section>
+
+    <section class="view"><h2>Koneksi (config)</h2>
+      ${(d.conns || []).map((c, i) => `
+      <div style="margin-bottom:18px">
+        <h3 style="font-size:12px;color:var(--mut);margin:10px 0 6px"><b>${esc(c.name)}</b> ${c.psk_set ? '<span class="badge on">PSK terpasang</span>' : '<span class="badge off">tanpa PSK</span>'}</h3>
+        <form class="f" onsubmit="return false;">
+          <input type="hidden" id="ipscName_${i}" value="${esc(c.name)}">
+          <label>auto<input id="ipscAuto_${i}" value="${esc(c.auto)}" placeholder="add"></label>
+          <label>leftsubnet<input id="ipscLeft_${i}" value="${esc(c.leftsubnet)}"></label>
+          <label>right (peer)<input id="ipscRight_${i}" value="${esc(c.right)}"></label>
+          <label>rightsubnet<input id="ipscRightSub_${i}" value="${esc(c.rightsubnet)}"></label>
+          <label>rightsourceip<input id="ipscPool_${i}" value="${esc(c.rightsourceip)}"></label>
+          <label>rightdns<input id="ipscDns_${i}" value="${esc(c.rightdns)}"></label>
+          <label>PSK (kosongkan utk biarkan)<input id="ipscPsk_${i}" type="password" placeholder="••••••••"></label>
+        </form>
+      </div>`).join("") || '<p class="muted">Tidak ada koneksi.</p>'}
+      <button onclick="saveIpsec()">Simpan & ipsec reload</button>
+      <p class="muted">Field yang dikosongkan akan dihapus/diabaikan. PSK hanya ditulis bila diisi; nilai tidak pernah dikirim balik ke UI.</p>
+    </section>
+  `);
+}
+async function saveIpsec() {
+  const all = [];
+  document.querySelectorAll("#content form").forEach((f, idx) => {
+    const g = id => { const el = document.getElementById(id); return el ? el.value : ""; };
+    const c = {
+      name: g("ipscName_" + idx),
+      auto: g("ipscAuto_" + idx) || null,
+      leftsubnet: g("ipscLeft_" + idx) || null,
+      right: g("ipscRight_" + idx) || null,
+      rightsubnet: g("ipscRightSub_" + idx) || null,
+      rightsourceip: g("ipscPool_" + idx) || null,
+      rightdns: g("ipscDns_" + idx) || null,
+    };
+    const psk = g("ipscPsk_" + idx);
+    if (psk) c.psk = psk;
+    if (c.name) all.push(c);
+  });
+  if (!all.length) return msg("Tidak ada koneksi untuk disimpan");
+  try {
+    await api("/ipsec", { method: "PUT", body: { conns: all } });
+    msg("Konfigurasi IPsec disimpan & daemon di-reload", "okmsg");
+    renderIpsec().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+
+async function toggleIpsec(active) {
+  try {
+    await api("/ipsec/toggle", { method: "POST", body: { active } });
+    msg("IPsec " + (active ? "dinyalakan" : "dimatikan"), "okmsg");
+    renderIpsec().catch(() => {});
+  } catch (e) { msg(e.message); }
+}
+
 /* ---------------- router ---------------- */
 const RENDER = {
   dashboard: renderDashboard,
@@ -1031,6 +1105,7 @@ const RENDER = {
   policy: renderPolicy,
   wireguard: renderWireguard,
   openvpn: renderOpenvpn,
+  ipsec: renderIpsec,
   interfaces: renderInterfaces,
   system: renderSystem,
   logs: renderLogs,

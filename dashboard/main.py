@@ -1959,6 +1959,213 @@ def openvpn_client():
 
 
 # --------------------------------------------------------------------------
+# IPsec (strongSwan — manage ipsec.conf + ipsec.secrets)
+# --------------------------------------------------------------------------
+IPSEC_CONF = "/etc/ipsec.conf"
+IPSEC_SECRETS = "/etc/ipsec.secrets"
+IPSEC_SERVICE = "strongswan-starter"
+
+
+class IpsecConnUpdate(BaseModel):
+    name: str
+    auto: Optional[str] = None
+    leftsubnet: Optional[str] = None
+    right: Optional[str] = None
+    rightsubnet: Optional[str] = None
+    rightsourceip: Optional[str] = None
+    rightdns: Optional[str] = None
+    psk: Optional[str] = None
+
+
+def ipsec_read_conf():
+    try:
+        with open(IPSEC_CONF) as f:
+            text = f.read()
+    except FileNotFoundError:
+        return "", {}
+    blocks = re.split(r"(?m)^conn\s+(\S+)\s*$", text)
+    header = blocks[0] if blocks else ""
+    conns = {}
+    for i in range(1, len(blocks), 2):
+        conns[blocks[i]] = blocks[i + 1] if i + 1 < len(blocks) else ""
+    return header, conns
+
+
+def ipsec_parse_conn(name, body):
+    vals = {"name": name, "left": "", "leftid": "", "auto": "", "leftsubnet": "", "right": "",
+            "rightsubnet": "", "rightsourceip": "", "rightdns": ""}
+    for line in body.splitlines():
+        m = re.match(r"\s*(\w+)\s*=\s*(\S.*)", line)
+        if m and m.group(1) in vals:
+            vals[m.group(1)] = m.group(2).strip()
+    return vals
+
+
+def ipsec_known_keys():
+    return {"left", "leftid", "leftsubnet", "right", "rightsubnet",
+            "rightsourceip", "rightdns", "auto"}
+
+
+def ipsec_write_conf(header, conns):
+    out = header.rstrip("\n") + "\n"
+    for name, body in conns.items():
+        out += f"\nconn {name}\n{body.rstrip()}\n"
+    with open(IPSEC_CONF, "w") as f:
+        f.write(out)
+    return out
+
+
+def ipsec_secrets_read():
+    secrets = []
+    try:
+        with open(IPSEC_SECRETS) as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                m = re.match(r"\S+\s+(\S+)\s*:\s*PSK\s*\"[^\"]*\"", s)
+                if m:
+                    secrets.append({"right": m.group(1)})
+    except FileNotFoundError:
+        pass
+    return secrets
+
+
+def ipsec_secrets_write(entries):
+    lines = ["# strongSwan secrets - dikelola dashboard"]
+    for e in entries:
+        lines.append(f"@router {e['right']} : PSK \"{e['psk']}\"")
+    with open(IPSEC_SECRETS, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def ipsec_statusall():
+    st = {"uptime": "", "pools": [], "listening": [], "conns": [],
+          "sas_up": 0, "sas_connecting": 0, "sa_list": []}
+    try:
+        p = subprocess.run(["ipsec", "statusall"], capture_output=True, text=True, timeout=15)
+        if p.returncode != 0:
+            return st
+        text = p.stdout
+    except Exception:
+        return st
+    in_pool = in_listen = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("uptime:"):
+            st["uptime"] = s[8:].strip()
+        elif s.startswith("Virtual IP pools"):
+            in_pool, in_listen = True, False
+            continue
+        elif s.startswith("Listening IP addresses"):
+            in_pool, in_listen = False, True
+            continue
+        elif in_listen and re.match(r"^\d+\.\d+\.\d+\.\d+$", s):
+            st["listening"].append(s)
+            continue
+        elif in_pool:
+            m = re.match(r"^([\d.]+/\d+):\s*(\d+)/(\d+)/(\d+)", s)
+            if m:
+                st["pools"].append({"net": m.group(1), "size": int(m.group(2)),
+                                    "online": int(m.group(3)), "offline": int(m.group(4))})
+            elif not s:
+                in_pool = False
+            continue
+        m = re.match(r"^Security Associations\s*\((\d+) up,\s*(\d+) connecting\)", s)
+        if m:
+            st["sas_up"], st["sas_connecting"] = int(m.group(1)), int(m.group(2))
+            continue
+        m = re.match(r"^(\S+)\[(\d+)\]:\s*ESTABLISHED.*?\.\.\.(\S+)", s)
+        if m:
+            st["sa_list"].append({"conn": m.group(1), "peer": m.group(3)})
+            continue
+        m = re.match(r"^(\S+):\s+\S+\.\.\.\S+\s+(IKEv2|IKEv1)", s)
+        if m:
+            st["conns"].append(m.group(1))
+    return st
+
+
+@app.get("/api/ipsec", dependencies=[Depends(check_auth)])
+def get_ipsec():
+    header, conns = ipsec_read_conf()
+    st = ipsec_statusall()
+    st["service"] = {
+        "active": subprocess.run(["systemctl", "is-active", IPSEC_SERVICE],
+                                 capture_output=True, text=True, timeout=5).stdout.strip() == "active",
+        "enabled": subprocess.run(["systemctl", "is-enabled", IPSEC_SERVICE],
+                                  capture_output=True, text=True, timeout=5).stdout.strip() == "enabled",
+    }
+    secret_rights = {e["right"] for e in ipsec_secrets_read()}
+    out_conns = []
+    for name, body in conns.items():
+        if name.startswith("%default"):
+            continue
+        c = ipsec_parse_conn(name, body)
+        c["psk_set"] = c["right"] in secret_rights
+        out_conns.append(c)
+    st["conns"] = out_conns
+    return st
+
+
+@app.put("/api/ipsec", dependencies=[Depends(check_auth)])
+def update_ipsec(r: dict):
+    updates = [IpsecConnUpdate(**c) for c in (r.get("conns") or [])]
+    if not os.path.exists(IPSEC_CONF):
+        raise HTTPException(404, "konfigurasi ipsec.conf tidak ditemukan")
+    header, conns = ipsec_read_conf()
+    secrets_to_write = []
+    for u in updates:
+        if u.name not in conns:
+            continue
+        body = conns[u.name]
+        vals = ipsec_parse_conn(u.name, body)
+        for k in ("auto", "leftsubnet", "right", "rightsubnet", "rightsourceip", "rightdns"):
+            v = getattr(u, k)
+            if v is not None:
+                vals[k] = v
+        out_lines = []
+        emitted = set()
+        for key in ("left", "leftid", "leftsubnet", "right", "rightsubnet",
+                    "rightsourceip", "rightdns", "auto"):
+            if key in vals and vals[key]:
+                out_lines.append(f"    {key}={vals[key]}")
+                emitted.add(key)
+        for line in body.splitlines():
+            m = re.match(r"\s*(\w+)\s*=", line)
+            if m and m.group(1) in emitted:
+                continue
+            out_lines.append(line)
+        conns[u.name] = "\n".join(out_lines)
+        if u.psk:
+            secrets_to_write.append({"right": vals["right"] or "%any", "psk": u.psk})
+    try:
+        ipsec_write_conf(header, conns)
+    except PermissionError:
+        raise HTTPException(500, "dashboard tidak bisa menulis ipsec.conf (izin?)")
+    if secrets_to_write:
+        try:
+            ipsec_secrets_write(secrets_to_write)
+        except PermissionError:
+            raise HTTPException(500, "dashboard tidak bisa menulis ipsec.secrets (izin?)")
+    p = subprocess.run(["ipsec", "reload"], capture_output=True, text=True, timeout=20)
+    if p.returncode != 0:
+        raise HTTPException(500, "ipsec reload gagal: " + (p.stdout + p.stderr)[-300:])
+    return {"ok": True}
+
+
+@app.post("/api/ipsec/toggle", dependencies=[Depends(check_auth)])
+def toggle_ipsec(r: dict):
+    active = bool(r.get("active"))
+    action = "start" if active else "stop"
+    p = subprocess.run(["systemctl", action, IPSEC_SERVICE], capture_output=True, text=True, timeout=30)
+    if p.returncode != 0:
+        raise HTTPException(500, f"gagal {action}: " + p.stderr.strip()[-300:])
+    en = subprocess.run(["systemctl", "enable" if active else "disable", IPSEC_SERVICE],
+                        capture_output=True, text=True, timeout=10)
+    return {"ok": True, "active": active}
+
+
+# --------------------------------------------------------------------------
 # Interfaces / System / Logs
 # --------------------------------------------------------------------------
 @app.get("/api/interfaces", dependencies=[Depends(check_auth)])
